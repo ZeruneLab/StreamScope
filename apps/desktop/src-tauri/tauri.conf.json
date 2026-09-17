@@ -1,0 +1,51 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "StreamScope",
+  "version": "0.1.4",
+  "identifier": "com.streamscope.desktop",
+  "build": {
+    "beforeDevCommand": "npm run dev",
+    "devUrl": "http://localhost:1420",
+    "beforeBuildCommand": "npm run build",
+    "frontendDist": "../dist"
+  },
+  "app": {
+    "security": {
+      "csp": "default-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; media-src 'self' asset: http://asset.localhost; connect-src ipc: http://ipc.localhost",
+      "assetProtocol": {
+        "enable": true,
+        "scope": ["$DOCUMENT/StreamScope/reports/**"]
+      }
+    },
+    "windows": [
+      {
+        "title": "StreamScope · 智能码流诊断",
+        "width": 1280,
+        "height": 820,
+        "minWidth": 980,
+        "minHeight": 680,
+        "center": true,
+        "resizable": true
+      }
+    ]
+  },
+  "bundle": {
+    "active": true,
+    "targets": ["nsis"],
+    "externalBin": ["binaries/ffmpeg", "binaries/ffprobe"],
+    "resources": {
+      "binaries/FFmpeg-LICENSE.txt": "FFmpeg-LICENSE.txt",
+      "binaries/FFmpeg-README.txt": "FFmpeg-README.txt"
+    },
+    "shortDescription": "RTSP/RTP/H.264 智能码流诊断工具",
+    "windows": {
+      "webviewInstallMode": {
+        "type": "downloadBootstrapper",
+        "silent": true
+      },
+      "nsis": {
+        "installerHooks": "./windows/installer-hooks.nsh"
+      }
+    }
+  }
+}

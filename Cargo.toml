@@ -1,0 +1,35 @@
+[workspace]
+members = [
+    "apps/cli",
+    "apps/desktop/src-tauri",
+    "crates/analyzer",
+    "crates/audio",
+    "crates/capture",
+    "crates/core",
+    "crates/diagnostics",
+    "crates/ffmpeg",
+    "crates/h264",
+    "crates/h265",
+    "crates/report",
+    "crates/rtp",
+    "crates/rtsp",
+    "crates/sdp",
+]
+resolver = "2"
+
+[workspace.package]
+version = "0.1.4"
+edition = "2024"
+license = "MIT"
+
+[workspace.dependencies]
+chrono = { version = "0.4.42", default-features = false, features = ["clock"] }
+clap = { version = "4.5.47", features = ["derive"] }
+serde = { version = "1.0.219", features = ["derive"] }
+serde_json = "1.0.143"
+thiserror = "2.0.16"
+url = "2.5.7"
+wait-timeout = "0.2.1"
+base64 = "0.22.1"
+md-5 = "0.10.6"
+percent-encoding = "2.3.2"

@@ -1,0 +1,31 @@
+# Rust build output
+/target/
+/target-*/
+
+# Frontend dependencies and build output
+/apps/desktop/node_modules/
+/apps/desktop/dist/
+
+# Tauri generated files and staged FFmpeg sidecars
+/apps/desktop/src-tauri/gen/schemas/
+/apps/desktop/src-tauri/binaries/*.exe
+/apps/desktop/src-tauri/binaries/FFmpeg-LICENSE.txt
+/apps/desktop/src-tauri/binaries/FFmpeg-README.txt
+
+# Local analysis data
+/reports/
+/captures/
+*.pcap
+*.pcapng
+*.log
+
+# Local configuration and secrets
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+
+# Operating-system metadata
+Thumbs.db
+.DS_Store

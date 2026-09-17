@@ -1,0 +1,16 @@
+[package]
+name = "streamscope-rtsp"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+base64.workspace = true
+md-5.workspace = true
+percent-encoding.workspace = true
+streamscope-core = { path = "../core" }
+streamscope-audio = { path = "../audio" }
+streamscope-rtp = { path = "../rtp" }
+streamscope-sdp = { path = "../sdp" }
+thiserror.workspace = true
+url.workspace = true

@@ -1,0 +1,20 @@
+[package]
+name = "streamscope-analyzer"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+streamscope-audio = { path = "../audio" }
+chrono.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+streamscope-core = { path = "../core" }
+streamscope-capture = { path = "../capture" }
+streamscope-diagnostics = { path = "../diagnostics" }
+streamscope-ffmpeg = { path = "../ffmpeg" }
+streamscope-h264 = { path = "../h264" }
+streamscope-h265 = { path = "../h265" }
+streamscope-report = { path = "../report" }
+streamscope-rtsp = { path = "../rtsp" }
+thiserror.workspace = true

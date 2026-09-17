@@ -1,0 +1,14 @@
+[package]
+name = "streamscope"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "streamscope"
+path = "src/main.rs"
+
+[dependencies]
+clap.workspace = true
+streamscope-analyzer = { path = "../../crates/analyzer" }
+streamscope-core = { path = "../../crates/core" }

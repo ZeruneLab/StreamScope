@@ -1,0 +1,10 @@
+[package]
+name = "streamscope-h264"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+streamscope-core = { path = "../core" }
+thiserror.workspace = true
+
