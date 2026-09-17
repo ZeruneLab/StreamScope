@@ -1,0 +1,27 @@
+[package]
+name = "streamscope-desktop"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[lib]
+name = "streamscope_desktop_lib"
+crate-type = ["rlib"]
+
+[[bin]]
+name = "streamscope-desktop"
+path = "src/main.rs"
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+serde.workspace = true
+serde_json.workspace = true
+streamscope-analyzer = { path = "../../../crates/analyzer" }
+streamscope-core = { path = "../../../crates/core" }
+streamscope-diagnostics = { path = "../../../crates/diagnostics" }
+streamscope-ffmpeg = { path = "../../../crates/ffmpeg" }
+streamscope-report = { path = "../../../crates/report" }
+tauri = { version = "2", features = ["protocol-asset"] }
+tauri-plugin-dialog = "2"

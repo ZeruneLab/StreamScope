@@ -1,0 +1,11 @@
+[package]
+name = "streamscope-rtp"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+serde.workspace = true
+streamscope-core = { path = "../core" }
+thiserror.workspace = true
+

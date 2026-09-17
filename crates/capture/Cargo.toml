@@ -1,0 +1,13 @@
+[package]
+name = "streamscope-capture"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+streamscope-audio = { path = "../audio" }
+streamscope-core = { path = "../core" }
+streamscope-h264 = { path = "../h264" }
+streamscope-h265 = { path = "../h265" }
+streamscope-rtp = { path = "../rtp" }
+thiserror.workspace = true
