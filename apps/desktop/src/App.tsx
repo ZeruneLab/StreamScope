@@ -3,6 +3,7 @@ import { convertFileSrc, invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { open, save } from "@tauri-apps/plugin-dialog";
 import { CaptureStreams } from "./CaptureStreams";
+import OnvifDiagnostics from "./OnvifDiagnostics";
 import type {
   AnalysisProgress,
   AnalysisRun,
@@ -19,7 +20,7 @@ import type {
 } from "./types";
 
 type View = "overview" | "playback" | "audioQuality" | "protocol" | "stream" | "videoDeep" | "diagnostics" | "timeline" | "report" | "log";
-type InputMode = "rtsp" | "h264" | "h265" | "audio" | "pcap";
+type InputMode = "rtsp" | "h264" | "h265" | "audio" | "pcap" | "onvif";
 type TransportMode = "tcp" | "udp" | "compare";
 type AudioExportFormat = "wav" | "mp3" | "m4a" | "flac" | "ogg";
 
@@ -440,6 +441,9 @@ function App() {
           <button className={`nav-item ${inputMode === "pcap" ? "active" : ""}`} type="button" onClick={() => { setInputMode("pcap"); setOfflinePath(""); }}>
             <span className="nav-icon">◫</span>PCAP / PCAPNG
           </button>
+          <button className={`nav-item ${inputMode === "onvif" ? "active" : ""}`} type="button" onClick={() => { setInputMode("onvif"); setOfflinePath(""); }}>
+            <span className="nav-icon">◎</span>ONVIF 诊断
+          </button>
         </nav>
 
         <div className="history">
@@ -465,16 +469,16 @@ function App() {
 
         <div className="sidebar-footer">
           <span className="online-dot" />本机分析引擎
-          <small>高级音画诊断 · v0.1.5</small>
+          <small>高级音画诊断 · v0.1.6</small>
         </div>
       </aside>
 
       <main>
         <header className="topbar">
           <div>
-            <p className="eyebrow">RTSP INSPECTOR</p>
-            <h1>{inputMode === "pcap" ? "多流抓包诊断" : inputMode === "h264" ? "H.264 文件诊断" : inputMode === "h265" ? "H.265 文件诊断" : inputMode === "audio" ? "音频文件诊断" : "实时流诊断"}</h1>
-            <p>{inputMode === "pcap" ? "发现抓包中的媒体流，独立查看每路的网络与码流证据。" : "验证媒体参数与实际解码结果。"}</p>
+            <p className="eyebrow">{inputMode === "onvif" ? "ONVIF DEVICE INSPECTOR" : "RTSP INSPECTOR"}</p>
+            <h1>{inputMode === "onvif" ? "ONVIF 设备诊断" : inputMode === "pcap" ? "多流抓包诊断" : inputMode === "h264" ? "H.264 文件诊断" : inputMode === "h265" ? "H.265 文件诊断" : inputMode === "audio" ? "音频文件诊断" : "实时流诊断"}</h1>
+            <p>{inputMode === "onvif" ? "按标准服务链验证设备能力，并把媒体入口交给现有 RTSP/RTP 分析器。" : inputMode === "pcap" ? "发现抓包中的媒体流，独立查看每路的网络与码流证据。" : "验证媒体参数与实际解码结果。"}</p>
           </div>
           <div className={`health-pill ${health.className}`}>
             <span />{health.label}
@@ -482,7 +486,8 @@ function App() {
         </header>
 
         <section className="workspace">
-          <form className="analysis-form panel" onSubmit={submit}>
+          {inputMode === "onvif" && <OnvifDiagnostics onAnalyzeRtsp={(streamUri) => { setUrl(streamUri); setInputMode("rtsp"); setRun(null); setError(""); }} />}
+          <form className={`analysis-form panel ${inputMode === "onvif" ? "mode-hidden" : ""}`} onSubmit={submit}>
             <div className="panel-heading">
               <div>
                 <span className="step">01</span>
@@ -584,9 +589,9 @@ function App() {
             )}
           </form>
 
-          {error && <div className="error-banner"><strong>无法开始分析</strong>{error}</div>}
+          {inputMode !== "onvif" && error && <div className="error-banner"><strong>无法开始分析</strong>{error}</div>}
 
-          <section className={`results panel ${run ? "has-result" : ""}`}>
+          <section className={`results panel ${run ? "has-result" : ""} ${inputMode === "onvif" ? "mode-hidden" : ""}`}>
             <div className="panel-heading results-heading">
               <div>
                 <span className="step">02</span>

@@ -28,10 +28,11 @@ StreamScope 是面向摄像头、NVR 和嵌入式音视频设备开发者的 RTS
 - 回放页可将当前音频轨另存为 WAV、MP3、M4A、FLAC 或 Ogg，也可按诊断区间单独导出；视频预览可另存为 MP4。导出在后台完成，不启动外部播放器或命令窗口。
 - RTSP 采集过程中按音频轨实时显示 RTP 包数、负载量、平均码率和滚动 PCM 波形；PCMA/PCMU 直接解码，AAC/Opus 通过内置 FFmpeg 在线解码，均显示真实 Peak/RMS。完整频谱、Mel 时频图、响度和异常区间在采集结束后生成。
 - PCAP/PCAPNG 中音频、视频按各自端点、通道和 SSRC 独立分流；有共同 RTCP CNAME 与 Sender Report 时计算音视频时钟偏差和多点漂移。
+- ONVIF 设备诊断：支持 WS-Discovery、SOAP 1.2、WS-Addressing、WS-Security UsernameToken、HTTP Digest，以及 Device、Media/Media2、Imaging、Events 基础只读接口；可从 Profile 提取 StreamUri 并转入现有 RTSP/RTP 深度分析。
 
 抓包多流分析：按捕获接口、方向端点、TCP 连接实例、Interleaved Channel 和 SSRC 分组，不限制为两路。每流独立统计序列缺口、时长、码率、H.264/H.265 和解码结果；不同 PT 不直接拆流，编码发生变化时停止混合解包并提示。支持 Ethernet/VLAN、原始 IP、Linux SLL/SLL2、IPv4/IPv6，以及 TCP 分段、乱序和重传重组。
 
-当前限制：不重组 IP 分片；缺帧、截断和 TCP 重组缺口会明确降低证据可信度。未知动态编码仅作为 RTP 候选，只有发现足够的 H.264 或 H.265 参数集与帧证据后才推断编码；H.265 RTP 当前支持 RFC 7798 常见非交织模式，不支持 DONL/DOND 交织模式。MP4A-LATM 仅保留 RTP 证据。软件可依据高可信 RTCP 偏差协调两个预览播放器，并能在深入分析时配对明显闪光与蜂鸣/脉冲事件；普通节目内容没有足够显著事件时会保持“证据不足”，不能把 RTCP 时钟映射解释为内容同步。RTSPS、ONVIF、完整 RTCP Reception Report 统计和 PDF 直出尚未实现。HTML 报告可使用系统打印功能另存为 PDF。
+当前限制：不重组 IP 分片；缺帧、截断和 TCP 重组缺口会明确降低证据可信度。未知动态编码仅作为 RTP 候选，只有发现足够的 H.264 或 H.265 参数集与帧证据后才推断编码；H.265 RTP 当前支持 RFC 7798 常见非交织模式，不支持 DONL/DOND 交织模式。MP4A-LATM 仅保留 RTP 证据。软件可依据高可信 RTCP 偏差协调两个预览播放器，并能在深入分析时配对明显闪光与蜂鸣/脉冲事件；普通节目内容没有足够显著事件时会保持“证据不足”，不能把 RTCP 时钟映射解释为内容同步。RTSPS、ONVIF 事件订阅/设备模拟、完整 RTCP Reception Report 统计和 PDF 直出尚未实现。HTML 报告可使用系统打印功能另存为 PDF。
 
 ### 多路抓包操作
 

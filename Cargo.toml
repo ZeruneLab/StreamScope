@@ -10,6 +10,7 @@ members = [
     "crates/ffmpeg",
     "crates/h264",
     "crates/h265",
+    "crates/onvif",
     "crates/report",
     "crates/rtp",
     "crates/rtsp",
@@ -18,7 +19,7 @@ members = [
 resolver = "2"
 
 [workspace.package]
-version = "0.1.5"
+version = "0.1.6"
 edition = "2024"
 license = "MIT"
 
@@ -33,3 +34,7 @@ wait-timeout = "0.2.1"
 base64 = "0.22.1"
 md-5 = "0.10.6"
 percent-encoding = "2.3.2"
+quick-xml = "0.42.0"
+reqwest = { version = "0.12.23", default-features = false, features = ["blocking", "rustls-tls-native-roots"] }
+sha1 = "0.10.6"
+uuid = { version = "1.18.1", features = ["v4"] }

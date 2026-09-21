@@ -6,6 +6,10 @@ use streamscope_analyzer::{
     H265FileOptions, PcapFileOptions,
 };
 use streamscope_core::{AnalysisResult, Transport};
+use streamscope_onvif::{
+    DiagnosticOptions as OnvifDiagnosticOptions, DiscoveredDevice, DiscoveryOptions,
+    OnvifDiagnosticResult,
+};
 use tauri::{Emitter, Manager};
 
 #[derive(Debug, Deserialize)]
@@ -221,6 +225,25 @@ async fn analyze_pcap_file(
         },
     );
     Ok(run)
+}
+
+#[tauri::command]
+async fn discover_onvif(timeout_seconds: u64) -> Result<Vec<DiscoveredDevice>, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        streamscope_onvif::discover(DiscoveryOptions { timeout_seconds })
+            .map_err(|error| error.to_string())
+    })
+    .await
+    .map_err(|error| format!("ONVIF 发现任务异常结束：{error}"))?
+}
+
+#[tauri::command]
+async fn diagnose_onvif(request: OnvifDiagnosticOptions) -> Result<OnvifDiagnosticResult, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        streamscope_onvif::diagnose(request).map_err(|error| error.to_string())
+    })
+    .await
+    .map_err(|error| format!("ONVIF 诊断任务异常结束：{error}"))?
 }
 
 #[tauri::command]
@@ -1198,6 +1221,8 @@ pub fn run() {
             analyze_h265_file,
             analyze_audio_file,
             analyze_pcap_file,
+            discover_onvif,
+            diagnose_onvif,
             compare_rtsp,
             cancel_analysis,
             export_media,

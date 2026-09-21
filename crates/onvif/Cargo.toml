@@ -1,0 +1,17 @@
+[package]
+name = "streamscope-onvif"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+base64.workspace = true
+chrono.workspace = true
+md-5.workspace = true
+quick-xml.workspace = true
+reqwest.workspace = true
+serde.workspace = true
+sha1.workspace = true
+thiserror.workspace = true
+url.workspace = true
+uuid.workspace = true
