@@ -1,13 +1,14 @@
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::io::Read;
 use std::path::Path;
 use std::process::{Command, ExitStatus, Stdio};
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use streamscope_core::{
     AudioLoudnessPoint, AvSyncEventPair, DecodeIssue, DecodeIssueLocation, DecodeSummary,
-    ToolAvailability, Transport, VideoStreamInfo, VisualScanSummary, redact_text,
+    ToolAvailability, Transport, VideoAnalysisCapability, VideoDeepAnalysis, VideoFrameIndex,
+    VideoStreamInfo, VisualScanSummary, redact_text,
 };
 use wait_timeout::ChildExt;
 
@@ -29,12 +30,186 @@ pub enum FfmpegError {
     NoVideoStream,
     #[error("预览视频生成失败: {message}")]
     PreviewFailed { message: String },
+    #[error("逐帧图像提取失败: {message}")]
+    FrameExtractFailed { message: String },
     #[error("不支持的音频导出格式: {0}")]
     UnsupportedAudioExportFormat(String),
     #[error("音频导出失败: {message}")]
     AudioExportFailed { message: String },
     #[error("音频响度测量失败: {message}")]
     LoudnessMeasurementFailed { message: String },
+    #[error("视频块分析失败: {message}")]
+    VideoWorkerFailed { message: String },
+    #[error("参考视频质量对比失败: {message}")]
+    VideoComparisonFailed { message: String },
+    #[error("分析任务已由用户取消")]
+    Cancelled,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct VideoReferenceComparison {
+    pub reference_name: String,
+    pub psnr_average_db: Option<f64>,
+    pub psnr_identical: bool,
+    pub ssim_all: f64,
+    #[serde(default)]
+    pub vmaf_mean: Option<f64>,
+    pub compared_frames: u64,
+    #[serde(default)]
+    pub compared_duration_ms: Option<u64>,
+    #[serde(default)]
+    pub source_width: Option<u32>,
+    #[serde(default)]
+    pub source_height: Option<u32>,
+    #[serde(default)]
+    pub reference_width: Option<u32>,
+    #[serde(default)]
+    pub reference_height: Option<u32>,
+    #[serde(default)]
+    pub source_pixel_format: Option<String>,
+    #[serde(default)]
+    pub reference_pixel_format: Option<String>,
+    #[serde(default)]
+    pub comparison_pixel_format: String,
+    #[serde(default)]
+    pub source_frame_rate: Option<String>,
+    #[serde(default)]
+    pub reference_frame_rate: Option<String>,
+    #[serde(default)]
+    pub alignment_method: String,
+    #[serde(default)]
+    pub detected_offset_ms: i64,
+    #[serde(default)]
+    pub alignment_confidence_percent: u8,
+    #[serde(default)]
+    pub alignment_error_milli: Option<u32>,
+    #[serde(default)]
+    pub coverage_basis: String,
+    pub method: String,
+    pub limitations: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct VideoWorkerDocument {
+    pub schema_version: String,
+    pub ffmpeg_version: String,
+    pub codec: String,
+    pub requested_start: u64,
+    pub requested_count: u64,
+    pub frames: Vec<VideoWorkerFrame>,
+    pub decoded_through: u64,
+    pub emitted_frames: u64,
+    pub window_complete: bool,
+    pub source_eof_reached: bool,
+    pub truncated: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct VideoWorkerFrame {
+    pub display_index: u64,
+    pub pts: i64,
+    pub best_effort_timestamp: i64,
+    pub time_base_num: i32,
+    pub time_base_den: i32,
+    pub width: u32,
+    pub height: u32,
+    pub key_frame: bool,
+    pub picture_type: String,
+    pub interlaced: bool,
+    #[serde(default)]
+    pub analyzer_version: Option<String>,
+    pub qp: Option<VideoQpData>,
+    pub motion_vectors: Vec<VideoMotionVector>,
+    #[serde(default)]
+    pub block_observations: Vec<VideoBlockObservation>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct VideoBlockObservation {
+    pub x: i32,
+    pub y: i32,
+    pub width: i32,
+    pub height: i32,
+    pub block_level: String,
+    pub type_flags: u32,
+    pub prediction_flags: u8,
+    #[serde(default)]
+    pub qp: Option<i32>,
+    #[serde(default)]
+    pub partition_mode: Option<String>,
+    #[serde(default)]
+    pub sub_partition_modes: Vec<Option<String>>,
+    #[serde(default)]
+    pub prediction_mode: Option<String>,
+    #[serde(default)]
+    pub tree_depth: Option<u8>,
+    #[serde(default)]
+    pub transform_flags: Option<u8>,
+    #[serde(default)]
+    pub ref_index_l0: Vec<i8>,
+    #[serde(default)]
+    pub ref_index_l1: Vec<i8>,
+    #[serde(default, deserialize_with = "deserialize_reference_pocs")]
+    pub reference_poc_l0: Vec<Option<i32>>,
+    #[serde(default, deserialize_with = "deserialize_reference_pocs")]
+    pub reference_poc_l1: Vec<Option<i32>>,
+    #[serde(default)]
+    pub motion_l0_x: Option<i16>,
+    #[serde(default)]
+    pub motion_l0_y: Option<i16>,
+    #[serde(default)]
+    pub motion_l1_x: Option<i16>,
+    #[serde(default)]
+    pub motion_l1_y: Option<i16>,
+}
+
+fn deserialize_reference_pocs<'de, D>(deserializer: D) -> Result<Vec<Option<i32>>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum ReferencePocs {
+        Legacy(Option<i32>),
+        Partitioned(Vec<Option<i32>>),
+    }
+
+    Ok(match ReferencePocs::deserialize(deserializer)? {
+        ReferencePocs::Legacy(Some(value)) => vec![Some(value)],
+        ReferencePocs::Legacy(None) => Vec::new(),
+        ReferencePocs::Partitioned(values) => values,
+    })
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct VideoQpData {
+    pub base: i32,
+    pub blocks: Vec<VideoQpBlock>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct VideoQpBlock {
+    pub x: i32,
+    pub y: i32,
+    pub width: i32,
+    pub height: i32,
+    pub delta: i32,
+    pub value: i32,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct VideoMotionVector {
+    pub source_direction: i32,
+    pub width: u32,
+    pub height: u32,
+    pub source_x: i32,
+    pub source_y: i32,
+    pub destination_x: i32,
+    pub destination_y: i32,
+    pub motion_x: i32,
+    pub motion_y: i32,
+    pub motion_scale: u32,
+    pub flags: u64,
 }
 
 #[derive(Debug)]
@@ -69,6 +244,47 @@ struct ProbeFormat {
     bit_rate: Option<String>,
 }
 
+#[derive(Debug, Deserialize)]
+struct FrameProbeDocument {
+    #[serde(default)]
+    frames: Vec<FrameProbeRecord>,
+}
+
+#[derive(Debug, Deserialize)]
+struct FrameProbeRecord {
+    #[serde(default)]
+    key_frame: Option<ProbeScalar>,
+    #[serde(default)]
+    pts_time: Option<ProbeScalar>,
+    #[serde(default)]
+    pkt_dts_time: Option<ProbeScalar>,
+    #[serde(default)]
+    best_effort_timestamp_time: Option<ProbeScalar>,
+    #[serde(default)]
+    pkt_duration_time: Option<ProbeScalar>,
+    #[serde(default)]
+    pkt_pos: Option<ProbeScalar>,
+    #[serde(default)]
+    pkt_size: Option<ProbeScalar>,
+    #[serde(default)]
+    pict_type: Option<String>,
+    #[serde(default)]
+    coded_picture_number: Option<ProbeScalar>,
+    #[serde(default)]
+    interlaced_frame: Option<ProbeScalar>,
+    #[serde(default)]
+    top_field_first: Option<ProbeScalar>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(untagged)]
+enum ProbeScalar {
+    Text(String),
+    Signed(i64),
+    Unsigned(u64),
+    Boolean(bool),
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ProbeResult {
     pub stream: VideoStreamInfo,
@@ -91,6 +307,74 @@ fn tool_command(name: &str) -> Command {
         }
     }
     Command::new(name)
+}
+
+fn video_worker_command() -> Command {
+    if let Some(directory) = std::env::var_os("STREAMSCOPE_VIDEO_WORKER_DIR") {
+        let executable = Path::new(&directory).join(if cfg!(windows) {
+            "video-worker.exe"
+        } else {
+            "video-worker"
+        });
+        if executable.is_file() {
+            return Command::new(executable);
+        }
+    }
+    tool_command("video-worker")
+}
+
+pub fn analyze_video_frame_blocks(
+    source: &Path,
+    output: &Path,
+    display_index: u64,
+    timeout: Duration,
+) -> Result<VideoWorkerFrame, FfmpegError> {
+    let mut command = video_worker_command();
+    command
+        .arg(source)
+        .arg(output)
+        .arg(display_index.to_string())
+        .arg("1");
+    let process = run_with_timeout(command, timeout, "video-worker")?;
+    if !process.status.success() {
+        let _ = std::fs::remove_file(output);
+        return Err(FfmpegError::VideoWorkerFailed {
+            message: String::from_utf8_lossy(&process.stderr).trim().to_owned(),
+        });
+    }
+    let document: VideoWorkerDocument =
+        serde_json::from_slice(&std::fs::read(output).map_err(|error| {
+            FfmpegError::VideoWorkerFailed {
+                message: format!("无法读取 worker 输出：{error}"),
+            }
+        })?)
+        .map_err(FfmpegError::InvalidProbeJson)?;
+    if !matches!(
+        document.schema_version.as_str(),
+        "streamscope.video-worker.v1"
+            | "streamscope.video-worker.v2"
+            | "streamscope.video-worker.v3"
+            | "streamscope.video-worker.v4"
+    ) {
+        return Err(FfmpegError::VideoWorkerFailed {
+            message: format!("不支持的 worker 数据版本：{}", document.schema_version),
+        });
+    }
+    let analyzer_version = format!(
+        "{} / FFmpeg {}",
+        document.schema_version, document.ffmpeg_version
+    );
+    document
+        .frames
+        .into_iter()
+        .find(|frame| frame.display_index == display_index)
+        .map(|mut frame| {
+            frame.analyzer_version = Some(analyzer_version);
+            frame
+        })
+        .ok_or_else(|| FfmpegError::VideoWorkerFailed {
+            message: format!("worker 未返回第 {display_index} 帧，视频可能已截断"),
+        })
 }
 
 pub fn check_tool(name: &str) -> ToolAvailability {
@@ -169,6 +453,35 @@ pub fn probe_file(source: &Path, timeout: Duration) -> Result<ProbeResult, Ffmpe
         });
     }
     parse_probe_json(&output.stdout)
+}
+
+pub fn probe_video_frames(
+    source: &Path,
+    codec: &str,
+    timeout: Duration,
+) -> Result<VideoDeepAnalysis, FfmpegError> {
+    const MAX_RETAINED_FRAMES: usize = 50_000;
+    let mut command = tool_command("ffprobe");
+    command
+        .args([
+            "-v",
+            "error",
+            "-select_streams",
+            "v:0",
+            "-show_frames",
+            "-show_entries",
+            "frame=key_frame,pts_time,pkt_dts_time,best_effort_timestamp_time,pkt_duration_time,pkt_pos,pkt_size,pict_type,coded_picture_number,interlaced_frame,top_field_first",
+            "-of",
+            "json",
+        ])
+        .arg(source);
+    let output = run_with_timeout(command, timeout, "ffprobe 帧索引")?;
+    if !output.status.success() {
+        return Err(FfmpegError::ProbeFailed {
+            message: String::from_utf8_lossy(&output.stderr).trim().to_owned(),
+        });
+    }
+    parse_frame_probe_json(&output.stdout, codec, MAX_RETAINED_FRAMES)
 }
 
 pub fn decode_rtsp(
@@ -309,6 +622,512 @@ pub fn create_preview_video(
     Err(FfmpegError::PreviewFailed {
         message: String::from_utf8_lossy(&output.stderr).trim().to_owned(),
     })
+}
+
+pub fn extract_video_frame(
+    source: &Path,
+    destination: &Path,
+    display_index: u64,
+    timeout: Duration,
+) -> Result<(), FfmpegError> {
+    let filter = format!("select=eq(n\\,{display_index})");
+    let mut command = tool_command("ffmpeg");
+    command
+        .args(["-nostdin", "-hide_banner", "-loglevel", "error", "-y", "-i"])
+        .arg(source)
+        .args(["-map", "0:v:0", "-an", "-vf", &filter, "-frames:v", "1"])
+        .arg(destination);
+    let output = run_with_timeout(command, timeout, "ffmpeg 逐帧图像提取")?;
+    if output.status.success()
+        && destination
+            .metadata()
+            .is_ok_and(|metadata| metadata.len() > 0)
+    {
+        return Ok(());
+    }
+    let _ = std::fs::remove_file(destination);
+    Err(FfmpegError::FrameExtractFailed {
+        message: String::from_utf8_lossy(&output.stderr).trim().to_owned(),
+    })
+}
+
+pub fn compare_video_reference(
+    source: &Path,
+    reference: &Path,
+    timeout: Duration,
+) -> Result<VideoReferenceComparison, FfmpegError> {
+    let source_probe = probe_file(source, timeout.min(Duration::from_secs(30)))?;
+    let reference_probe = probe_file(reference, timeout.min(Duration::from_secs(30)))?;
+    let width = source_probe
+        .stream
+        .width
+        .ok_or_else(|| FfmpegError::VideoComparisonFailed {
+            message: "无法取得主视频宽度".into(),
+        })?;
+    let height = source_probe
+        .stream
+        .height
+        .ok_or_else(|| FfmpegError::VideoComparisonFailed {
+            message: "无法取得主视频高度".into(),
+        })?;
+    let comparison_pixel_format = comparison_pixel_format(
+        source_probe.stream.pixel_format.as_deref(),
+        reference_probe.stream.pixel_format.as_deref(),
+    );
+    let alignment = detect_content_alignment(source, reference, timeout).unwrap_or_default();
+    let filter_prefix =
+        comparison_filter_prefix(width, height, comparison_pixel_format, alignment.offset_ms);
+    let framesync = "shortest=1:eof_action=endall:repeatlast=0";
+    let (ssim_log, compared_frames, compared_duration_ms) = run_video_metric(
+        source,
+        reference,
+        &format!("{filter_prefix};[main][reference]ssim={framesync}"),
+        timeout,
+        "SSIM",
+    )?;
+    let ssim_all = parse_video_metric(&ssim_log, "All:").ok_or_else(|| {
+        FfmpegError::VideoComparisonFailed {
+            message: "FFmpeg 未返回 SSIM 汇总值，可能没有可对齐的视频帧".into(),
+        }
+    })?;
+    let (psnr_log, psnr_frames, psnr_duration_ms) = run_video_metric(
+        source,
+        reference,
+        &format!("{filter_prefix};[main][reference]psnr={framesync}"),
+        timeout,
+        "PSNR",
+    )?;
+    let psnr_value = parse_video_metric_token(&psnr_log, "average:").ok_or_else(|| {
+        FfmpegError::VideoComparisonFailed {
+            message: "FFmpeg 未返回 PSNR 汇总值，可能没有可对齐的视频帧".into(),
+        }
+    })?;
+    let psnr_identical = psnr_value.eq_ignore_ascii_case("inf");
+    let psnr_average_db = if psnr_identical {
+        None
+    } else {
+        psnr_value
+            .parse::<f64>()
+            .ok()
+            .filter(|value| value.is_finite())
+    };
+    if !psnr_identical && psnr_average_db.is_none() {
+        return Err(FfmpegError::VideoComparisonFailed {
+            message: format!("无法解析 FFmpeg 返回的 PSNR 值：{psnr_value}"),
+        });
+    }
+    let compared_frames = compared_frames
+        .or(psnr_frames)
+        .filter(|value| *value > 0)
+        .ok_or_else(|| FfmpegError::VideoComparisonFailed {
+            message: "FFmpeg 没有比较任何视频帧".into(),
+        })?;
+    let compared_duration_ms = compared_duration_ms.or(psnr_duration_ms);
+    let mut limitations = vec!["结果衡量像素差异，不直接等同于人眼主观画质或花屏诊断结论。".into()];
+    if !alignment.reliable {
+        limitations.push(
+            "内容指纹没有得到可信的非零偏移；本次按两路起始 PTS 归零比较。静态或重复画面可能无法自动对齐。"
+                .into(),
+        );
+    } else {
+        limitations.push(
+            "内容对齐使用前 120 秒、2 fps、32×18 灰度指纹在 ±30 秒内搜索；周期性或高度重复画面仍可能产生歧义。"
+                .into(),
+        );
+    }
+    if (reference_probe.stream.width, reference_probe.stream.height) != (Some(width), Some(height))
+    {
+        limitations.push("参考视频已使用 bicubic 缩放到主视频分辨率；缩放会影响客观指标。".into());
+    }
+    if source_probe.stream.pixel_format.as_deref() != Some(comparison_pixel_format)
+        || reference_probe.stream.pixel_format.as_deref() != Some(comparison_pixel_format)
+    {
+        limitations.push(format!(
+            "两路画面统一转换为 {comparison_pixel_format} 后比较；色度采样或位深转换可能影响指标。"
+        ));
+    }
+    if source_probe.stream.frame_rate != reference_probe.stream.frame_rate {
+        limitations
+            .push("两路帧率不同；当前不插帧，按归零后的时间戳交由 FFmpeg framesync 配对。".into());
+    }
+    let vmaf_mean = match run_video_metric(
+        source,
+        reference,
+        &format!("{filter_prefix};[main][reference]libvmaf={framesync}"),
+        timeout,
+        "VMAF",
+    ) {
+        Ok((log, _, _)) => parse_video_metric(&log, "score:"),
+        Err(_) => None,
+    };
+    if vmaf_mean.is_none() {
+        limitations.push("当前 FFmpeg 构建未返回 VMAF；PSNR/SSIM 结果仍有效。".into());
+    }
+    Ok(VideoReferenceComparison {
+        reference_name: reference
+            .file_name()
+            .and_then(|value| value.to_str())
+            .unwrap_or("reference-video")
+            .to_owned(),
+        psnr_average_db,
+        psnr_identical,
+        ssim_all,
+        vmaf_mean,
+        compared_frames,
+        compared_duration_ms,
+        source_width: source_probe.stream.width,
+        source_height: source_probe.stream.height,
+        reference_width: reference_probe.stream.width,
+        reference_height: reference_probe.stream.height,
+        source_pixel_format: source_probe.stream.pixel_format,
+        reference_pixel_format: reference_probe.stream.pixel_format,
+        comparison_pixel_format: comparison_pixel_format.into(),
+        source_frame_rate: source_probe.stream.frame_rate,
+        reference_frame_rate: reference_probe.stream.frame_rate,
+        alignment_method: if alignment.reliable {
+            "content_luma_fingerprint_2fps".into()
+        } else {
+            "start_pts_zero_fallback".into()
+        },
+        detected_offset_ms: alignment.offset_ms,
+        alignment_confidence_percent: alignment.confidence_percent,
+        alignment_error_milli: alignment.error_milli,
+        coverage_basis: "shortest_common_decoded_frame_sequence".into(),
+        method: "FFmpeg 软件解码；先做低分辨率内容指纹偏移搜索，再将对齐后的 PTS 归零；禁用末帧重复；参考画面按需缩放到主视频尺寸；只比较共同解码覆盖".into(),
+        limitations,
+    })
+}
+
+const ALIGNMENT_FPS: i64 = 2;
+const ALIGNMENT_WIDTH: usize = 32;
+const ALIGNMENT_HEIGHT: usize = 18;
+
+#[derive(Debug, Clone, Copy, Default)]
+struct ContentAlignment {
+    offset_ms: i64,
+    confidence_percent: u8,
+    error_milli: Option<u32>,
+    reliable: bool,
+}
+
+fn comparison_filter_prefix(width: u32, height: u32, pixel_format: &str, offset_ms: i64) -> String {
+    let source_start = if offset_ms < 0 {
+        -offset_ms as f64 / 1_000.0
+    } else {
+        0.0
+    };
+    let reference_start = if offset_ms > 0 {
+        offset_ms as f64 / 1_000.0
+    } else {
+        0.0
+    };
+    format!(
+        "[0:v]trim=start={source_start:.3},setpts=PTS-STARTPTS,scale={width}:{height}:flags=bicubic,format={pixel_format}[main];[1:v]trim=start={reference_start:.3},setpts=PTS-STARTPTS,scale={width}:{height}:flags=bicubic,format={pixel_format}[reference]"
+    )
+}
+
+fn detect_content_alignment(
+    source: &Path,
+    reference: &Path,
+    timeout: Duration,
+) -> Result<ContentAlignment, FfmpegError> {
+    let source_frames = extract_alignment_fingerprints(source, timeout)?;
+    let reference_frames = extract_alignment_fingerprints(reference, timeout)?;
+    Ok(find_content_alignment(&source_frames, &reference_frames))
+}
+
+fn extract_alignment_fingerprints(
+    source: &Path,
+    timeout: Duration,
+) -> Result<Vec<Vec<u8>>, FfmpegError> {
+    let mut command = tool_command("ffmpeg");
+    command
+        .args(["-nostdin", "-hide_banner", "-loglevel", "error", "-i"])
+        .arg(source)
+        .args([
+            "-map",
+            "0:v:0",
+            "-an",
+            "-t",
+            "120",
+            "-vf",
+            "fps=2,scale=32:18:flags=area,format=gray",
+            "-frames:v",
+            "240",
+            "-pix_fmt",
+            "gray",
+            "-f",
+            "rawvideo",
+            "pipe:1",
+        ]);
+    let output = run_with_timeout(
+        command,
+        timeout.min(Duration::from_secs(45)),
+        "ffmpeg 内容指纹",
+    )?;
+    if !output.status.success() {
+        return Err(FfmpegError::VideoComparisonFailed {
+            message: format!(
+                "内容指纹提取失败：{}",
+                compact_process_error(&String::from_utf8_lossy(&output.stderr))
+            ),
+        });
+    }
+    let frame_size = ALIGNMENT_WIDTH * ALIGNMENT_HEIGHT;
+    Ok(output
+        .stdout
+        .chunks_exact(frame_size)
+        .map(|frame| frame.to_vec())
+        .collect())
+}
+
+fn find_content_alignment(source: &[Vec<u8>], reference: &[Vec<u8>]) -> ContentAlignment {
+    let shorter = source.len().min(reference.len());
+    if shorter < 4 {
+        return ContentAlignment::default();
+    }
+    let minimum_overlap = (shorter / 3).max(4);
+    let maximum_shift = 60_i32.min((shorter - minimum_overlap) as i32);
+    let score = |shift: i32| -> Option<f64> {
+        let source_start = (-shift).max(0) as usize;
+        let reference_start = shift.max(0) as usize;
+        let overlap = (source.len() - source_start).min(reference.len() - reference_start);
+        if overlap < minimum_overlap {
+            return None;
+        }
+        let total = source[source_start..source_start + overlap]
+            .iter()
+            .zip(&reference[reference_start..reference_start + overlap])
+            .map(|(left, right)| {
+                left.iter()
+                    .zip(right)
+                    .map(|(left, right)| (*left as i16 - *right as i16).unsigned_abs() as u64)
+                    .sum::<u64>()
+            })
+            .sum::<u64>();
+        Some(total as f64 / (overlap * ALIGNMENT_WIDTH * ALIGNMENT_HEIGHT) as f64 / 255.0)
+    };
+    let zero_score = score(0).unwrap_or(1.0);
+    let Some((best_shift, best_score)) = (-maximum_shift..=maximum_shift)
+        .filter_map(|shift| score(shift).map(|value| (shift, value)))
+        .min_by(|left, right| left.1.total_cmp(&right.1))
+    else {
+        return ContentAlignment::default();
+    };
+    let scene_activity = source
+        .windows(2)
+        .chain(reference.windows(2))
+        .map(|frames| {
+            frames[0]
+                .iter()
+                .zip(&frames[1])
+                .map(|(left, right)| (*left as i16 - *right as i16).unsigned_abs() as u64)
+                .sum::<u64>() as f64
+                / (ALIGNMENT_WIDTH * ALIGNMENT_HEIGHT) as f64
+        })
+        .fold(0.0_f64, f64::max);
+    let improvement = if zero_score > f64::EPSILON {
+        ((zero_score - best_score) / zero_score).max(0.0)
+    } else {
+        1.0
+    };
+    let reliable =
+        best_shift != 0 && scene_activity >= 2.0 && improvement >= 0.15 && best_score <= 0.25;
+    ContentAlignment {
+        offset_ms: if reliable {
+            i64::from(best_shift) * 1_000 / ALIGNMENT_FPS
+        } else {
+            0
+        },
+        confidence_percent: if reliable {
+            (improvement * 100.0).round().clamp(1.0, 100.0) as u8
+        } else if best_shift == 0 && best_score <= 0.05 {
+            100
+        } else {
+            0
+        },
+        error_milli: Some((best_score * 1_000.0).round().clamp(0.0, 1_000.0) as u32),
+        reliable,
+    }
+}
+
+fn comparison_pixel_format(source: Option<&str>, reference: Option<&str>) -> &'static str {
+    let high_bit_depth = |format: Option<&str>| {
+        format.is_some_and(|value| {
+            value.contains("p10")
+                || value.contains("p12")
+                || value.contains("p14")
+                || value.contains("p16")
+                || value.starts_with("p010")
+                || value.starts_with("p016")
+        })
+    };
+    if high_bit_depth(source) || high_bit_depth(reference) {
+        "yuv420p10le"
+    } else {
+        "yuv420p"
+    }
+}
+
+pub fn create_video_reference_difference_preview(
+    source: &Path,
+    reference: &Path,
+    destination: &Path,
+    timeout: Duration,
+) -> Result<(), FfmpegError> {
+    let source_probe = probe_file(source, timeout.min(Duration::from_secs(30)))?;
+    let width = source_probe
+        .stream
+        .width
+        .ok_or_else(|| FfmpegError::VideoComparisonFailed {
+            message: "无法取得主视频宽度".into(),
+        })?;
+    let height = source_probe
+        .stream
+        .height
+        .ok_or_else(|| FfmpegError::VideoComparisonFailed {
+            message: "无法取得主视频高度".into(),
+        })?;
+    let alignment = detect_content_alignment(source, reference, timeout).unwrap_or_default();
+    let prefix = comparison_filter_prefix(width, height, "yuv420p", alignment.offset_ms);
+    let filter = format!(
+        "{prefix};[main][reference]blend=all_mode=difference:shortest=1,eq=contrast=4:brightness=0.02[difference]"
+    );
+    let mut command = tool_command("ffmpeg");
+    command
+        .args([
+            "-nostdin",
+            "-hide_banner",
+            "-loglevel",
+            "warning",
+            "-y",
+            "-i",
+        ])
+        .arg(source)
+        .arg("-i")
+        .arg(reference)
+        .args([
+            "-filter_complex",
+            &filter,
+            "-map",
+            "[difference]",
+            "-an",
+            "-shortest",
+            "-t",
+            "60",
+            "-c:v",
+            "libx264",
+            "-preset",
+            "veryfast",
+            "-crf",
+            "18",
+            "-pix_fmt",
+            "yuv420p",
+            "-movflags",
+            "+faststart",
+        ])
+        .arg(destination);
+    let output = run_with_timeout(command, timeout, "ffmpeg 参考视频差异预览")?;
+    if output.status.success()
+        && destination
+            .metadata()
+            .is_ok_and(|metadata| metadata.len() > 0)
+    {
+        return Ok(());
+    }
+    let _ = std::fs::remove_file(destination);
+    Err(FfmpegError::VideoComparisonFailed {
+        message: format!(
+            "差异预览生成失败：{}",
+            compact_process_error(&String::from_utf8_lossy(&output.stderr))
+        ),
+    })
+}
+
+fn run_video_metric(
+    source: &Path,
+    reference: &Path,
+    filter: &str,
+    timeout: Duration,
+    metric: &str,
+) -> Result<(String, Option<u64>, Option<u64>), FfmpegError> {
+    let mut command = tool_command("ffmpeg");
+    command
+        .args(["-nostdin", "-hide_banner", "-loglevel", "info", "-i"])
+        .arg(source)
+        .arg("-i")
+        .arg(reference)
+        .args([
+            "-filter_complex",
+            filter,
+            "-an",
+            "-shortest",
+            "-progress",
+            "pipe:1",
+            "-nostats",
+            "-f",
+            "null",
+            "-",
+        ]);
+    let output = run_with_timeout(command, timeout, &format!("ffmpeg {metric}"))?;
+    let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
+    if !output.status.success() {
+        return Err(FfmpegError::VideoComparisonFailed {
+            message: format!("{metric} 计算未完成：{}", compact_process_error(&stderr)),
+        });
+    }
+    let progress = String::from_utf8_lossy(&output.stdout);
+    Ok((
+        stderr,
+        parse_decoded_frames(&progress),
+        parse_progress_duration_ms(&progress),
+    ))
+}
+
+fn parse_progress_duration_ms(progress: &str) -> Option<u64> {
+    progress
+        .lines()
+        .filter_map(|line| line.strip_prefix("out_time_us="))
+        .filter_map(|value| value.trim().parse::<u64>().ok())
+        .next_back()
+        .map(|value| value / 1_000)
+}
+
+fn parse_video_metric(log: &str, marker: &str) -> Option<f64> {
+    parse_video_metric_token(log, marker)?
+        .parse::<f64>()
+        .ok()
+        .filter(|value| value.is_finite())
+}
+
+fn parse_video_metric_token<'a>(log: &'a str, marker: &str) -> Option<&'a str> {
+    log.lines().rev().find_map(|line| {
+        let parts = line.split_whitespace().collect::<Vec<_>>();
+        parts.iter().enumerate().find_map(|(index, part)| {
+            let suffix = part.strip_prefix(marker)?;
+            let value = if suffix.is_empty() {
+                *parts.get(index + 1)?
+            } else {
+                suffix
+            };
+            Some(value.trim_matches(|character: char| character == ',' || character == ';'))
+        })
+    })
+}
+
+fn compact_process_error(log: &str) -> String {
+    log.lines()
+        .rev()
+        .find(|line| {
+            let line = line.trim();
+            !line.is_empty()
+                && !line.starts_with("Input #")
+                && !line.starts_with("  Metadata:")
+                && !line.starts_with("  Duration:")
+        })
+        .map(str::trim)
+        .unwrap_or("FFmpeg 未提供错误详情")
+        .to_owned()
 }
 
 pub fn create_preview_audio(
@@ -791,7 +1610,7 @@ fn exported_audio_has_media(progress: &[u8]) -> bool {
 
 const VISUAL_SCAN_WIDTH: usize = 320;
 const VISUAL_SCAN_HEIGHT: usize = 180;
-const VISUAL_SCAN_FPS: u32 = 4;
+const VISUAL_SCAN_FPS: u32 = 8;
 const VISUAL_SCAN_BANDS: usize = 45;
 
 #[derive(Debug, Clone, Copy)]
@@ -815,7 +1634,7 @@ fn scan_visual_artifacts(
             "-t",
             "30",
             "-vf",
-            "fps=4,scale=320:180:flags=fast_bilinear",
+            "fps=8,scale=320:180:flags=fast_bilinear",
             "-pix_fmt",
             "rgb24",
             "-f",
@@ -858,7 +1677,7 @@ fn scan_visual_artifacts(
                 .map(|(frame, _, _, _)| DecodeIssueLocation {
                     frame_number: frame as u64 + 1,
                     pts_time: Some(format!("{:.3}", frame as f64 / VISUAL_SCAN_FPS as f64)),
-                    precision: "visual_scan_4fps_candidate".into(),
+                    precision: "visual_scan_8fps_candidate".into(),
                 })
                 .collect(),
         }]
@@ -874,7 +1693,7 @@ fn scan_visual_artifacts(
             scan_height: VISUAL_SCAN_HEIGHT as u32,
             candidate_frames: confirmed.len() as u64,
             note: Some(
-                "启发式局部破碎扫描：命中表示疑似花屏候选，未命中不等同于保证画面正常".into(),
+                "8 fps 启发式局部破碎扫描：提高短暂花屏捕获率；命中表示疑似候选，未命中不等同于保证画面正常".into(),
             ),
         },
     ))
@@ -897,10 +1716,10 @@ fn find_visual_detections(frames: &[&[u8]]) -> Vec<(usize, usize, f64, f64)> {
         for (band, metric) in metrics.iter().enumerate().skip(1) {
             let ratio = metric.fragmentation / median;
             let boundary_ratio = metric.boundary / median_boundary;
-            if metric.fragmentation >= median * 1.75 + 3.0
-                && ratio >= 1.9
-                && metric.boundary >= median_boundary * 1.2 + 3.0
-                && boundary_ratio >= 1.35
+            if metric.fragmentation >= median * 1.6 + 2.5
+                && ratio >= 1.7
+                && metric.boundary >= median_boundary * 1.15 + 2.5
+                && boundary_ratio >= 1.25
             {
                 detections.push((frame_index, band, ratio, boundary_ratio));
             }
@@ -911,7 +1730,7 @@ fn find_visual_detections(frames: &[&[u8]]) -> Vec<(usize, usize, f64, f64)> {
         let adjacent = detections
             .iter()
             .any(|other| other.0.abs_diff(detection.0) == 1 && other.1.abs_diff(detection.1) <= 1);
-        if adjacent || detection.2 >= 4.0 {
+        if adjacent || detection.2 >= 3.0 {
             confirmed.push(*detection);
         }
     }
@@ -1021,9 +1840,17 @@ fn run_with_timeout(
         bytes
     });
 
-    let status = match child.wait_timeout(timeout) {
-        Ok(Some(status)) => status,
-        Ok(None) => {
+    let started = Instant::now();
+    let status = loop {
+        if streamscope_core::analysis_cancellation_requested() {
+            let _ = child.kill();
+            let _ = child.wait();
+            let _ = stdout_reader.join();
+            let _ = stderr_reader.join();
+            return Err(FfmpegError::Cancelled);
+        }
+        let remaining = timeout.saturating_sub(started.elapsed());
+        if remaining.is_zero() {
             let _ = child.kill();
             let _ = child.wait();
             let _ = stdout_reader.join();
@@ -1032,15 +1859,19 @@ fn run_with_timeout(
                 program: program.to_owned(),
             });
         }
-        Err(source) => {
-            let _ = child.kill();
-            let _ = child.wait();
-            let _ = stdout_reader.join();
-            let _ = stderr_reader.join();
-            return Err(FfmpegError::Start {
-                program: program.to_owned(),
-                source,
-            });
+        match child.wait_timeout(remaining.min(Duration::from_millis(100))) {
+            Ok(Some(status)) => break status,
+            Ok(None) => {}
+            Err(source) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                let _ = stdout_reader.join();
+                let _ = stderr_reader.join();
+                return Err(FfmpegError::Start {
+                    program: program.to_owned(),
+                    source,
+                });
+            }
         }
     };
     Ok(ProcessOutput {
@@ -1087,6 +1918,183 @@ fn parse_probe_json(bytes: &[u8]) -> Result<ProbeResult, FfmpegError> {
             .and_then(|value| value.parse().ok()),
         session_sdp: None,
     })
+}
+
+fn parse_frame_probe_json(
+    bytes: &[u8],
+    codec: &str,
+    maximum_frames: usize,
+) -> Result<VideoDeepAnalysis, FfmpegError> {
+    let document: FrameProbeDocument = serde_json::from_slice(bytes)?;
+    let total_frames = document.frames.len();
+    let mut decode_index_counts = BTreeMap::<u64, usize>::new();
+    for decode_index in document
+        .frames
+        .iter()
+        .filter_map(|frame| scalar_u64(frame.coded_picture_number.as_ref()))
+    {
+        *decode_index_counts.entry(decode_index).or_default() += 1;
+    }
+    let frames: Vec<_> = document
+        .frames
+        .into_iter()
+        .take(maximum_frames)
+        .enumerate()
+        .map(|(index, frame)| {
+            let reported_decode_index = scalar_u64(frame.coded_picture_number.as_ref());
+            let decode_index = reported_decode_index.filter(|value| {
+                *value < total_frames as u64 && decode_index_counts.get(value).copied() == Some(1)
+            });
+            let pts_ms = scalar_milliseconds(
+                frame
+                    .pts_time
+                    .as_ref()
+                    .or(frame.best_effort_timestamp_time.as_ref()),
+            );
+            VideoFrameIndex {
+                display_index: index as u64,
+                decode_index,
+                decode_index_precision: match (reported_decode_index, decode_index) {
+                    (Some(_), Some(_)) => "ffmpeg_coded_picture_number",
+                    (Some(_), None) => "unavailable_invalid_or_non_unique_coded_picture_number",
+                    (None, _) => "unavailable",
+                }
+                .into(),
+                pts_ms,
+                dts_ms: scalar_milliseconds(frame.pkt_dts_time.as_ref()),
+                duration_ms: scalar_milliseconds(frame.pkt_duration_time.as_ref())
+                    .and_then(|value| u64::try_from(value).ok()),
+                packet_position: scalar_u64(frame.pkt_pos.as_ref()),
+                packet_size: scalar_u64(frame.pkt_size.as_ref()),
+                picture_type: frame.pict_type,
+                key_frame: scalar_bool(frame.key_frame.as_ref()).unwrap_or(false),
+                interlaced: scalar_bool(frame.interlaced_frame.as_ref()),
+                top_field_first: scalar_bool(frame.top_field_first.as_ref()),
+            }
+        })
+        .collect();
+    let coverage_start_ms = frames
+        .iter()
+        .filter_map(|frame| frame.pts_ms)
+        .min()
+        .and_then(|value| u64::try_from(value).ok());
+    let coverage_end_ms = frames
+        .iter()
+        .filter_map(|frame| {
+            frame
+                .pts_ms
+                .and_then(|value| u64::try_from(value).ok())
+                .map(|value| value.saturating_add(frame.duration_ms.unwrap_or(0)))
+        })
+        .max();
+    let coverage_complete = total_frames <= maximum_frames;
+    let block_reason = if codec.eq_ignore_ascii_case("h264") {
+        "由独立 video-worker 按所选帧导出实际 QP、MV、宏块类型和参考列表索引；未加载的帧不生成块数据"
+    } else {
+        "由定制 video-worker 按所选帧导出兼容的最小 CB/PU 网格，以及解码器解析得到的 CTU、叶子 CU/PU 和有变换语法的叶子 TU；无残差或 PCM 块不伪造 TU"
+    };
+    Ok(VideoDeepAnalysis {
+        codec: codec.to_ascii_lowercase(),
+        status: if frames.is_empty() {
+            "unavailable"
+        } else if coverage_complete {
+            "indexed"
+        } else {
+            "partial"
+        }
+        .into(),
+        indexed_frames: frames.len() as u64,
+        coverage_start_ms,
+        coverage_end_ms,
+        coverage_complete,
+        coverage_reason: (!coverage_complete)
+            .then(|| format!("帧索引超过 {maximum_frames} 条，仅保留前 {maximum_frames} 帧")),
+        frames,
+        capabilities: vec![
+            VideoAnalysisCapability {
+                id: "frame_index".into(),
+                label: "逐帧索引".into(),
+                status: "available".into(),
+                reason: None,
+            },
+            VideoAnalysisCapability {
+                id: "block_qp".into(),
+                label: "块级 QP".into(),
+                status: "on_demand".into(),
+                reason: Some(block_reason.into()),
+            },
+            VideoAnalysisCapability {
+                id: "motion_vectors".into(),
+                label: "运动矢量".into(),
+                status: "on_demand".into(),
+                reason: Some(block_reason.into()),
+            },
+            VideoAnalysisCapability {
+                id: "motion_partition_geometry".into(),
+                label: "运动分区几何".into(),
+                status: "on_demand".into(),
+                reason: Some(if codec.eq_ignore_ascii_case("h264") {
+                    "宽高来自 AVMotionVector 的实际运动块；只覆盖导出 MV 的预测块，不等同于完整宏块类型树"
+                } else {
+                    "PU 宽高来自解码器实际 PartMode；同时保留最小 PU 采样网格用于兼容和交叉核验"
+                }.into()),
+            },
+            VideoAnalysisCapability {
+                id: "block_partition".into(),
+                label: if codec.eq_ignore_ascii_case("h264") {
+                    "宏块类型 / 参考列表"
+                } else {
+                    "CTU / CU / PU / TU 树"
+                }
+                .into(),
+                status: "on_demand".into(),
+                reason: Some(block_reason.into()),
+            },
+        ],
+        limitations: vec![
+            "显示序号来自 ffprobe 解码输出顺序；编码序号只在解码器提供 coded_picture_number 时可用"
+                .into(),
+            "裸码流缺少容器时间戳时，PTS/DTS、持续时间和字节位置可能为空".into(),
+            "逐帧索引可用于定位与统计，但不等同于块级编码分析".into(),
+        ],
+    })
+}
+
+fn scalar_text(value: Option<&ProbeScalar>) -> Option<&str> {
+    match value? {
+        ProbeScalar::Text(value) => Some(value),
+        _ => None,
+    }
+}
+
+fn scalar_u64(value: Option<&ProbeScalar>) -> Option<u64> {
+    match value? {
+        ProbeScalar::Text(value) => value.parse().ok(),
+        ProbeScalar::Signed(value) => u64::try_from(*value).ok(),
+        ProbeScalar::Unsigned(value) => Some(*value),
+        ProbeScalar::Boolean(value) => Some(u64::from(*value)),
+    }
+}
+
+fn scalar_bool(value: Option<&ProbeScalar>) -> Option<bool> {
+    match value? {
+        ProbeScalar::Text(value) => match value.as_str() {
+            "0" | "false" => Some(false),
+            "1" | "true" => Some(true),
+            _ => None,
+        },
+        ProbeScalar::Signed(value) => Some(*value != 0),
+        ProbeScalar::Unsigned(value) => Some(*value != 0),
+        ProbeScalar::Boolean(value) => Some(*value),
+    }
+}
+
+fn scalar_milliseconds(value: Option<&ProbeScalar>) -> Option<i64> {
+    let value = scalar_text(value)?;
+    let seconds = value.parse::<f64>().ok()?;
+    seconds
+        .is_finite()
+        .then(|| (seconds * 1_000.0).round() as i64)
 }
 
 fn parse_sdp_trace(log: &str) -> Option<String> {
@@ -1298,6 +2306,409 @@ mod tests {
     }
 
     #[test]
+    fn accepts_legacy_single_reference_poc_and_partitioned_pocs() {
+        let legacy = serde_json::from_str::<VideoBlockObservation>(
+            r#"{"x":0,"y":0,"width":16,"height":16,"block_level":"h264_macroblock","type_flags":1,"prediction_flags":0,"qp":24,"ref_index_l0":[0,-1,-1,-1],"ref_index_l1":[-1,-1,-1,-1],"reference_poc_l0":12,"reference_poc_l1":null,"motion_l0_x":null,"motion_l0_y":null,"motion_l1_x":null,"motion_l1_y":null}"#,
+        )
+        .unwrap();
+        assert_eq!(legacy.reference_poc_l0, vec![Some(12)]);
+        assert!(legacy.reference_poc_l1.is_empty());
+        assert!(legacy.partition_mode.is_none());
+        assert!(legacy.sub_partition_modes.is_empty());
+
+        let partitioned = serde_json::from_str::<VideoBlockObservation>(
+            r#"{"x":0,"y":0,"width":16,"height":16,"block_level":"h264_macroblock","type_flags":1,"prediction_flags":0,"qp":24,"partition_mode":"8x8","sub_partition_modes":["8x8","8x4","4x8","4x4"],"ref_index_l0":[0,1,-1,-1],"ref_index_l1":[-1,-1,-1,-1],"reference_poc_l0":[12,8,null,null],"reference_poc_l1":[null,null,null,null],"motion_l0_x":null,"motion_l0_y":null,"motion_l1_x":null,"motion_l1_y":null}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            partitioned.reference_poc_l0,
+            vec![Some(12), Some(8), None, None]
+        );
+
+        let sparse = serde_json::from_str::<VideoBlockObservation>(
+            r#"{"x":0,"y":0,"width":64,"height":64,"block_level":"hevc_ctu","type_flags":0,"prediction_flags":0,"tree_depth":0}"#,
+        )
+        .unwrap();
+        assert_eq!(sparse.block_level, "hevc_ctu");
+        assert_eq!(sparse.qp, None);
+        assert!(sparse.ref_index_l0.is_empty());
+        assert_eq!(sparse.motion_l0_x, None);
+        assert_eq!(partitioned.partition_mode.as_deref(), Some("8x8"));
+        assert_eq!(
+            partitioned.sub_partition_modes,
+            vec![
+                Some("8x8".into()),
+                Some("8x4".into()),
+                Some("4x8".into()),
+                Some("4x4".into())
+            ]
+        );
+    }
+
+    #[test]
+    fn builds_bounded_video_frame_index_without_inventing_block_data() {
+        let json = br#"{
+          "frames": [
+            {"key_frame":1,"pts_time":"0.000000","pkt_dts_time":"0.000000",
+             "pkt_duration_time":"0.040000","pkt_pos":"12","pkt_size":"900",
+             "pict_type":"I","coded_picture_number":0,"interlaced_frame":0},
+            {"key_frame":0,"best_effort_timestamp_time":"0.040000",
+             "pkt_duration_time":"0.040000","pkt_pos":"912","pkt_size":"120",
+             "pict_type":"P","coded_picture_number":1,"interlaced_frame":0}
+          ]
+        }"#;
+        let analysis = parse_frame_probe_json(json, "h264", 1).unwrap();
+        assert_eq!(analysis.status, "partial");
+        assert_eq!(analysis.indexed_frames, 1);
+        assert!(!analysis.coverage_complete);
+        assert_eq!(analysis.frames[0].picture_type.as_deref(), Some("I"));
+        assert_eq!(analysis.frames[0].packet_position, Some(12));
+        assert_eq!(analysis.frames[0].duration_ms, Some(40));
+        assert!(
+            analysis.capabilities.iter().any(|capability| {
+                capability.id == "block_qp" && capability.status == "on_demand"
+            })
+        );
+
+        let hevc = parse_frame_probe_json(json, "h265", 2).unwrap();
+        assert!(hevc.capabilities.iter().any(|capability| {
+            capability.id == "block_qp"
+                && capability.status == "on_demand"
+                && capability
+                    .reason
+                    .as_deref()
+                    .is_some_and(|reason| reason.contains("CTU"))
+        }));
+        assert!(hevc.capabilities.iter().any(|capability| {
+            capability.id == "block_partition"
+                && capability.label == "CTU / CU / PU / TU 树"
+                && capability.status == "on_demand"
+        }));
+    }
+
+    #[test]
+    fn rejects_ambiguous_or_out_of_range_decode_indices() {
+        let json = br#"{
+          "frames": [
+            {"coded_picture_number":0,"pict_type":"I"},
+            {"coded_picture_number":0,"pict_type":"P"},
+            {"coded_picture_number":9,"pict_type":"P"}
+          ]
+        }"#;
+        let analysis = parse_frame_probe_json(json, "h264", 10).unwrap();
+        assert!(
+            analysis
+                .frames
+                .iter()
+                .all(|frame| frame.decode_index.is_none())
+        );
+        assert!(analysis.frames.iter().all(|frame| {
+            frame.decode_index_precision == "unavailable_invalid_or_non_unique_coded_picture_number"
+        }));
+    }
+
+    #[test]
+    fn extracts_an_exact_display_frame_to_png() {
+        if !check_tool("ffmpeg").available {
+            return;
+        }
+        let source =
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("../../fixtures/h264/generated-normal.h264");
+        if !source.is_file() {
+            return;
+        }
+        let directory = std::env::temp_dir().join(format!(
+            "streamscope-frame-extract-test-{}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&directory).unwrap();
+        let destination = directory.join("frame-3.png");
+        extract_video_frame(&source, &destination, 3, Duration::from_secs(30)).unwrap();
+        let bytes = std::fs::read(&destination).unwrap();
+        assert!(bytes.starts_with(&[0x89, b'P', b'N', b'G']));
+        std::fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn reads_real_h264_qp_blocks_and_motion_vectors_from_worker() {
+        let source =
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("../../fixtures/h264/generated-normal.h264");
+        if !source.is_file() {
+            return;
+        }
+        let directory = std::env::temp_dir().join(format!(
+            "streamscope-video-worker-test-{}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&directory).unwrap();
+        let output = directory.join("frame-3.json");
+        let frame = match analyze_video_frame_blocks(&source, &output, 3, Duration::from_secs(30)) {
+            Ok(frame) => frame,
+            Err(FfmpegError::Start { .. }) => {
+                std::fs::remove_dir_all(directory).unwrap();
+                return;
+            }
+            Err(error) => panic!("video worker failed: {error}"),
+        };
+        assert_eq!(frame.display_index, 3);
+        assert_eq!(frame.picture_type, "P");
+        let qp = frame.qp.expect("H.264 decoder should export QP blocks");
+        assert!(!qp.blocks.is_empty());
+        assert!(
+            qp.blocks
+                .iter()
+                .all(|block| (0..=63).contains(&block.value))
+        );
+        assert!(!frame.motion_vectors.is_empty());
+        assert!(
+            frame
+                .motion_vectors
+                .iter()
+                .all(|vector| vector.motion_scale > 0)
+        );
+        let macroblocks = frame
+            .block_observations
+            .iter()
+            .filter(|block| block.block_level == "h264_macroblock")
+            .collect::<Vec<_>>();
+        assert!(!macroblocks.is_empty());
+        assert!(
+            macroblocks
+                .iter()
+                .all(|block| block.partition_mode.is_some())
+        );
+        for block in macroblocks
+            .iter()
+            .filter(|block| block.partition_mode.as_deref() == Some("8x8"))
+        {
+            assert_eq!(block.sub_partition_modes.len(), 4);
+            assert!(
+                block
+                    .sub_partition_modes
+                    .iter()
+                    .flatten()
+                    .all(|mode| { matches!(mode.as_str(), "8x8" | "8x4" | "4x8" | "4x4") })
+            );
+        }
+        let referenced = frame
+            .block_observations
+            .iter()
+            .filter(|block| block.block_level == "h264_macroblock")
+            .flat_map(|block| {
+                block
+                    .ref_index_l0
+                    .iter()
+                    .zip(&block.reference_poc_l0)
+                    .chain(block.ref_index_l1.iter().zip(&block.reference_poc_l1))
+            })
+            .filter(|(index, _)| **index >= 0)
+            .collect::<Vec<_>>();
+        assert!(
+            !referenced.is_empty(),
+            "P frame should use a reference picture"
+        );
+        assert!(
+            referenced.iter().all(|(_, poc)| poc.is_some()),
+            "every used H.264 8x8 reference index must resolve to a POC"
+        );
+        std::fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn keeps_b_frame_identity_when_loading_worker_blocks() {
+        if !check_tool("ffmpeg").available {
+            return;
+        }
+        let directory = std::env::temp_dir().join(format!(
+            "streamscope-video-worker-b-frame-test-{}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&directory).unwrap();
+        let source = directory.join("b-frames.h264");
+        let mut encoder = tool_command("ffmpeg");
+        encoder.args([
+            "-nostdin",
+            "-hide_banner",
+            "-loglevel",
+            "error",
+            "-f",
+            "lavfi",
+            "-i",
+            "testsrc2=size=320x180:rate=25",
+            "-frames:v",
+            "30",
+            "-c:v",
+            "libx264",
+            "-profile:v",
+            "high",
+            "-g",
+            "15",
+            "-bf",
+            "2",
+            "-x264-params",
+            "partitions=all",
+            "-pix_fmt",
+            "yuv420p",
+            "-f",
+            "h264",
+            "-y",
+        ]);
+        encoder.arg(&source);
+        let encoded = run_with_timeout(encoder, Duration::from_secs(30), "ffmpeg test encoder")
+            .expect("test encoder should start");
+        assert!(
+            encoded.status.success(),
+            "test encoder failed: {}",
+            String::from_utf8_lossy(&encoded.stderr)
+        );
+        let index = probe_video_frames(&source, "h264", Duration::from_secs(30)).unwrap();
+        let b_frame = index
+            .frames
+            .iter()
+            .find(|frame| frame.picture_type.as_deref() == Some("B"))
+            .expect("generated stream should contain B frames");
+        let output = directory.join("b-frame.json");
+        let blocks = match analyze_video_frame_blocks(
+            &source,
+            &output,
+            b_frame.display_index,
+            Duration::from_secs(30),
+        ) {
+            Ok(frame) => frame,
+            Err(FfmpegError::Start { .. }) => {
+                std::fs::remove_dir_all(directory).unwrap();
+                return;
+            }
+            Err(error) => panic!("video worker failed: {error}"),
+        };
+        assert_eq!(blocks.display_index, b_frame.display_index);
+        assert_eq!(blocks.picture_type, "B");
+        assert!(blocks.qp.is_some());
+        assert!(!blocks.motion_vectors.is_empty());
+        assert!(
+            blocks
+                .block_observations
+                .iter()
+                .filter(|block| block.block_level == "h264_macroblock")
+                .all(|block| block.partition_mode.is_some())
+        );
+        assert!(blocks.block_observations.iter().any(|block| {
+            block.partition_mode.as_deref() == Some("8x8")
+                && block.sub_partition_modes.len() == 4
+                && block.sub_partition_modes.iter().all(|mode| {
+                    mode.as_deref()
+                        .is_some_and(|value| matches!(value, "8x8" | "8x4" | "4x8" | "4x4"))
+                })
+        }));
+        assert!(blocks.block_observations.iter().any(|block| {
+            block
+                .ref_index_l1
+                .iter()
+                .zip(&block.reference_poc_l1)
+                .any(|(index, poc)| *index >= 0 && poc.is_some())
+        }));
+        std::fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn reports_h265_internal_blocks_only_when_worker_exports_verified_data() {
+        if !check_tool("ffmpeg").available {
+            return;
+        }
+        let directory = std::env::temp_dir().join(format!(
+            "streamscope-video-worker-h265-test-{}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&directory).unwrap();
+        let source = directory.join("sample.h265");
+        let mut encoder = tool_command("ffmpeg");
+        encoder.args([
+            "-nostdin",
+            "-hide_banner",
+            "-loglevel",
+            "error",
+            "-f",
+            "lavfi",
+            "-i",
+            "testsrc2=size=160x96:rate=10",
+            "-frames:v",
+            "6",
+            "-c:v",
+            "libx265",
+            "-x265-params",
+            "log-level=error",
+            "-pix_fmt",
+            "yuv420p",
+            "-f",
+            "hevc",
+            "-y",
+        ]);
+        encoder.arg(&source);
+        let encoded = run_with_timeout(encoder, Duration::from_secs(30), "ffmpeg test encoder")
+            .expect("test encoder should start");
+        if !encoded.status.success() {
+            std::fs::remove_dir_all(directory).unwrap();
+            return;
+        }
+        let index = probe_video_frames(&source, "h265", Duration::from_secs(30)).unwrap();
+        let predicted = index
+            .frames
+            .iter()
+            .find(|frame| frame.picture_type.as_deref() != Some("I"))
+            .expect("generated HEVC stream should contain a predicted frame");
+        let output = directory.join("frame.json");
+        let frame = match analyze_video_frame_blocks(
+            &source,
+            &output,
+            predicted.display_index,
+            Duration::from_secs(30),
+        ) {
+            Ok(frame) => frame,
+            Err(FfmpegError::Start { .. }) => {
+                std::fs::remove_dir_all(directory).unwrap();
+                return;
+            }
+            Err(error) => panic!("video worker failed: {error}"),
+        };
+        assert_eq!(frame.display_index, predicted.display_index);
+        if frame.block_observations.is_empty() {
+            assert_eq!(frame.qp, None);
+        } else {
+            assert!(frame.qp.as_ref().is_some_and(|qp| !qp.blocks.is_empty()));
+            assert!(
+                frame
+                    .block_observations
+                    .iter()
+                    .all(|block| block.block_level.starts_with("hevc_"))
+            );
+            assert!(
+                frame
+                    .block_observations
+                    .iter()
+                    .any(|block| block.block_level == "hevc_ctu")
+            );
+            assert!(frame.block_observations.iter().any(|block| {
+                block.block_level == "hevc_cu"
+                    && block.partition_mode.is_some()
+                    && block.prediction_mode.is_some()
+                    && block.tree_depth.is_some()
+            }));
+            assert!(frame.block_observations.iter().any(|block| {
+                block.block_level == "hevc_pu"
+                    && block.partition_mode.is_some()
+                    && block.prediction_mode.is_some()
+                    && block.prediction_flags != 0
+            }));
+            assert!(frame.block_observations.iter().any(|block| {
+                block.block_level == "hevc_tu"
+                    && block.tree_depth.is_some()
+                    && block.transform_flags.is_some()
+            }));
+        }
+        std::fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
     fn extracts_sdp_block_from_ffprobe_trace() {
         let log = "[rtsp @ 0001] SDP:\nv=0\no=- 1 1 IN IP4 192.0.2.1\ns=Camera\nt=0 0\nm=video 0 RTP/AVP 96\n[rtsp @ 0001] setting jitter buffer size";
         let sdp = parse_sdp_trace(log).unwrap();
@@ -1358,6 +2769,146 @@ mod tests {
     #[test]
     fn reads_last_progress_frame_count() {
         assert_eq!(parse_decoded_frames("frame=1\nfps=0\nframe=42\n"), Some(42));
+        assert_eq!(
+            parse_progress_duration_ms(
+                "out_time_us=40000\nprogress=continue\nout_time_us=1680000\n"
+            ),
+            Some(1_680)
+        );
+    }
+
+    #[test]
+    fn preserves_high_bit_depth_for_reference_metrics() {
+        assert_eq!(
+            comparison_pixel_format(Some("yuv420p"), Some("nv12")),
+            "yuv420p"
+        );
+        assert_eq!(
+            comparison_pixel_format(Some("yuv420p10le"), Some("yuv420p")),
+            "yuv420p10le"
+        );
+    }
+
+    #[test]
+    fn parses_last_video_quality_metric() {
+        let log = "[Parsed_ssim_0] SSIM Y:0.9 All:0.912345 (10.5)\n[Parsed_psnr_0] PSNR average:38.765 min:30 max:44\n";
+        assert_eq!(parse_video_metric(log, "All:"), Some(0.912345));
+        assert_eq!(parse_video_metric_token(log, "average:"), Some("38.765"));
+        assert_eq!(
+            parse_video_metric("[libvmaf] VMAF score: 99.125000", "score:"),
+            Some(99.125)
+        );
+        assert_eq!(
+            parse_video_metric_token("PSNR average:inf min:inf", "average:"),
+            Some("inf")
+        );
+    }
+
+    #[test]
+    fn compares_identical_reference_video() {
+        if !check_tool("ffmpeg").available {
+            return;
+        }
+        let source = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("..")
+            .join("..")
+            .join("fixtures")
+            .join("h264")
+            .join("generated-normal.h264");
+        let comparison = compare_video_reference(&source, &source, Duration::from_secs(60))
+            .expect("identical reference comparison should succeed");
+        assert!(comparison.ssim_all > 0.999_999);
+        assert!(comparison.psnr_identical);
+        assert!(comparison.psnr_average_db.is_none());
+        if let Some(vmaf) = comparison.vmaf_mean {
+            assert!(vmaf > 95.0);
+        }
+        assert!(comparison.compared_frames > 0);
+        assert!(comparison.compared_duration_ms.is_some());
+        assert_eq!(comparison.source_width, comparison.reference_width);
+        assert_eq!(comparison.source_height, comparison.reference_height);
+        assert!(!comparison.comparison_pixel_format.is_empty());
+        assert_eq!(comparison.detected_offset_ms, 0);
+        assert!(matches!(
+            comparison.alignment_method.as_str(),
+            "content_luma_fingerprint_2fps" | "start_pts_zero_fallback"
+        ));
+        assert_eq!(
+            comparison.coverage_basis,
+            "shortest_common_decoded_frame_sequence"
+        );
+        let preview = std::env::temp_dir().join(format!(
+            "streamscope-reference-difference-{}.mp4",
+            std::process::id()
+        ));
+        create_video_reference_difference_preview(
+            &source,
+            &source,
+            &preview,
+            Duration::from_secs(60),
+        )
+        .expect("difference preview should be generated");
+        assert!(preview.metadata().unwrap().len() > 0);
+        std::fs::remove_file(preview).unwrap();
+    }
+
+    #[test]
+    fn reference_comparison_stops_at_shorter_input_without_repeating_last_frame() {
+        if !check_tool("ffmpeg").available {
+            return;
+        }
+        let source = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("..")
+            .join("..")
+            .join("fixtures")
+            .join("h264")
+            .join("generated-normal.h264");
+        let directory = std::env::temp_dir().join(format!(
+            "streamscope-short-reference-test-{}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&directory).unwrap();
+        let reference = directory.join("three-frames.mp4");
+        let mut command = tool_command("ffmpeg");
+        command
+            .args(["-nostdin", "-hide_banner", "-loglevel", "error", "-y", "-i"])
+            .arg(&source)
+            .args([
+                "-frames:v",
+                "3",
+                "-an",
+                "-c:v",
+                "libx264",
+                "-pix_fmt",
+                "yuv420p",
+            ])
+            .arg(&reference);
+        let output =
+            run_with_timeout(command, Duration::from_secs(30), "ffmpeg 测试参考视频").unwrap();
+        assert!(output.status.success());
+
+        let comparison = compare_video_reference(&source, &reference, Duration::from_secs(60))
+            .expect("short reference comparison should succeed");
+        assert_eq!(comparison.compared_frames, 3);
+        assert_eq!(
+            comparison.coverage_basis,
+            "shortest_common_decoded_frame_sequence"
+        );
+        std::fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn finds_known_content_fingerprint_offset() {
+        let frame = |value: u8| vec![value; ALIGNMENT_WIDTH * ALIGNMENT_HEIGHT];
+        let source = (0..20).map(|index| frame(index * 10)).collect::<Vec<_>>();
+        let mut reference = vec![frame(255), frame(240)];
+        reference.extend(source.iter().cloned());
+
+        let alignment = find_content_alignment(&source, &reference);
+        assert!(alignment.reliable);
+        assert_eq!(alignment.offset_ms, 1_000);
+        assert_eq!(alignment.error_milli, Some(0));
+        assert!(alignment.confidence_percent >= 90);
     }
 
     #[test]
@@ -1564,5 +3115,18 @@ mod tests {
                 .all(|item| item.1 == VISUAL_SCAN_BANDS - 1)
         );
         assert_eq!(visual_detection_boundaries(&detections).len(), 2);
+    }
+
+    #[test]
+    fn visual_scan_does_not_flag_a_clean_static_lower_third() {
+        let frame_bytes = VISUAL_SCAN_WIDTH * VISUAL_SCAN_HEIGHT * 3;
+        let mut frame = vec![150_u8; frame_bytes];
+        for y in VISUAL_SCAN_HEIGHT * 3 / 4..VISUAL_SCAN_HEIGHT {
+            for x in 0..VISUAL_SCAN_WIDTH {
+                let offset = (y * VISUAL_SCAN_WIDTH + x) * 3;
+                frame[offset..offset + 3].copy_from_slice(&[30, 80, 180]);
+            }
+        }
+        assert!(find_visual_detections(&[&frame, &frame]).is_empty());
     }
 }

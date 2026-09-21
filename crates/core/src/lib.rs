@@ -1,7 +1,22 @@
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::fmt;
+use std::sync::atomic::{AtomicBool, Ordering};
 use url::Url;
+
+static ANALYSIS_CANCELLATION_REQUESTED: AtomicBool = AtomicBool::new(false);
+
+pub fn reset_analysis_cancellation() {
+    ANALYSIS_CANCELLATION_REQUESTED.store(false, Ordering::SeqCst);
+}
+
+pub fn request_analysis_cancellation() {
+    ANALYSIS_CANCELLATION_REQUESTED.store(true, Ordering::SeqCst);
+}
+
+pub fn analysis_cancellation_requested() -> bool {
+    ANALYSIS_CANCELLATION_REQUESTED.load(Ordering::SeqCst)
+}
 
 pub const RESULT_SCHEMA_VERSION: &str = "streamscope.multistream.v4";
 
@@ -409,10 +424,33 @@ pub struct DataQuality {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct H264CpbEntry {
+    pub bit_rate_bps: u64,
+    pub cpb_size_bits: u64,
+    pub cbr: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct H264HrdInfo {
+    pub cpb_count: u32,
+    pub maximum_bit_rate_bps: u64,
+    pub maximum_cpb_size_bits: u64,
+    pub all_cbr: bool,
+    #[serde(default)]
+    pub entries: Vec<H264CpbEntry>,
+    pub initial_cpb_removal_delay_length: u8,
+    pub cpb_removal_delay_length: u8,
+    pub dpb_output_delay_length: u8,
+    pub time_offset_length: u8,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct H264SpsInfo {
     pub id: u32,
     pub profile_idc: u8,
     pub level_idc: u8,
+    #[serde(default)]
+    pub constraint_set3_flag: bool,
     pub chroma_format_idc: u32,
     pub bit_depth_luma: u8,
     pub bit_depth_chroma: u8,
@@ -423,6 +461,18 @@ pub struct H264SpsInfo {
     pub height: u32,
     pub progressive: bool,
     pub fps_milli: Option<u32>,
+    #[serde(default)]
+    pub num_units_in_tick: Option<u32>,
+    #[serde(default)]
+    pub time_scale: Option<u32>,
+    #[serde(default)]
+    pub nal_hrd: Option<H264HrdInfo>,
+    #[serde(default)]
+    pub vcl_hrd: Option<H264HrdInfo>,
+    #[serde(default)]
+    pub max_num_reorder_frames: Option<u32>,
+    #[serde(default)]
+    pub max_dec_frame_buffering: Option<u32>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -442,6 +492,61 @@ pub struct H264Issue {
     pub detail: String,
     pub sequence: Option<u16>,
     pub timestamp: Option<u32>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct H264HrdAuPoint {
+    pub access_unit: u64,
+    pub sei_nalu: u64,
+    pub access_unit_bits: u64,
+    pub cpb_removal_delay: u32,
+    pub dpb_output_delay: u32,
+    pub fullness_before_removal_bits: u64,
+    pub fullness_after_removal_bits: u64,
+    pub overflow: bool,
+    pub underflow: bool,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct H264HrdSimulation {
+    pub status: String,
+    pub schedule: String,
+    pub sps_id: Option<u32>,
+    pub cpb_entry_index: Option<u32>,
+    pub buffering_period_count: u64,
+    pub pic_timing_count: u64,
+    pub simulated_aus: u64,
+    pub minimum_fullness_bits: Option<u64>,
+    pub maximum_fullness_bits: Option<u64>,
+    #[serde(default)]
+    pub overflow_aus: Vec<u64>,
+    #[serde(default)]
+    pub underflow_aus: Vec<u64>,
+    #[serde(default)]
+    pub delay_discontinuities: Vec<u64>,
+    #[serde(default)]
+    pub points: Vec<H264HrdAuPoint>,
+    #[serde(default)]
+    pub points_truncated: bool,
+    #[serde(default)]
+    pub limitations: Vec<String>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct VideoRecoveryWindow {
+    pub source_frame: u64,
+    pub source_kind: String,
+    pub source_offset_ms: Option<u64>,
+    pub first_packet: Option<u64>,
+    pub last_packet: Option<u64>,
+    pub next_random_access_frame: Option<u64>,
+    pub next_random_access_offset_ms: Option<u64>,
+    pub wait_frames: Option<u64>,
+    pub wait_ms: Option<u64>,
+    pub structural_status: String,
+    pub visual_status: String,
+    #[serde(default)]
+    pub limitations: Vec<String>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
@@ -466,6 +571,18 @@ pub struct H264Analysis {
     pub frames: Vec<H264FrameEvidence>,
     #[serde(default)]
     pub frame_evidence_truncated: bool,
+    #[serde(default)]
+    pub deep_analysis: Option<VideoDeepAnalysis>,
+    #[serde(default)]
+    pub nalus: Vec<VideoNaluEvidence>,
+    #[serde(default)]
+    pub nalu_evidence_truncated: bool,
+    #[serde(default)]
+    pub parameter_changes: Vec<VideoParameterChange>,
+    #[serde(default)]
+    pub recovery_windows: Vec<VideoRecoveryWindow>,
+    #[serde(default)]
+    pub hrd_simulation: H264HrdSimulation,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -480,6 +597,10 @@ pub struct H265SpsInfo {
     pub bit_depth_chroma: u8,
     pub width: u32,
     pub height: u32,
+    #[serde(default)]
+    pub max_dec_pic_buffering: Option<u32>,
+    #[serde(default)]
+    pub max_num_reorder_pics: Option<u32>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -513,6 +634,118 @@ pub struct H265Analysis {
     pub frames: Vec<H264FrameEvidence>,
     #[serde(default)]
     pub frame_evidence_truncated: bool,
+    #[serde(default)]
+    pub deep_analysis: Option<VideoDeepAnalysis>,
+    #[serde(default)]
+    pub nalus: Vec<VideoNaluEvidence>,
+    #[serde(default)]
+    pub nalu_evidence_truncated: bool,
+    #[serde(default)]
+    pub parameter_changes: Vec<VideoParameterChange>,
+    #[serde(default)]
+    pub recovery_windows: Vec<VideoRecoveryWindow>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct VideoDeepAnalysis {
+    pub codec: String,
+    pub status: String,
+    pub indexed_frames: u64,
+    pub coverage_start_ms: Option<u64>,
+    pub coverage_end_ms: Option<u64>,
+    pub coverage_complete: bool,
+    pub coverage_reason: Option<String>,
+    pub frames: Vec<VideoFrameIndex>,
+    pub capabilities: Vec<VideoAnalysisCapability>,
+    pub limitations: Vec<String>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct VideoAnalysisCapability {
+    pub id: String,
+    pub label: String,
+    pub status: String,
+    pub reason: Option<String>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct VideoFrameIndex {
+    pub display_index: u64,
+    pub decode_index: Option<u64>,
+    pub decode_index_precision: String,
+    pub pts_ms: Option<i64>,
+    pub dts_ms: Option<i64>,
+    pub duration_ms: Option<u64>,
+    pub packet_position: Option<u64>,
+    pub packet_size: Option<u64>,
+    pub picture_type: Option<String>,
+    pub key_frame: bool,
+    pub interlaced: Option<bool>,
+    pub top_field_first: Option<bool>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct VideoSyntaxDocument {
+    pub codec: String,
+    pub display_index: u64,
+    pub access_unit_index: Option<u64>,
+    pub mapping_precision: String,
+    pub nalus: Vec<VideoSyntaxNalu>,
+    pub limitations: Vec<String>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct VideoSyntaxNalu {
+    pub index: u64,
+    pub offset: u64,
+    pub size: u64,
+    pub nalu_type: u8,
+    pub type_name: String,
+    pub fields: Vec<VideoSyntaxField>,
+    pub hex: String,
+    pub hex_truncated: bool,
+    pub complete: Option<bool>,
+    pub access_unit_number: Option<u64>,
+    pub packets: Vec<VideoPacketAssociation>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct VideoSyntaxField {
+    pub name: String,
+    pub value: String,
+    pub source: String,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct VideoNaluEvidence {
+    pub nalu_number: u64,
+    pub nalu_type: u8,
+    pub type_name: String,
+    pub complete: bool,
+    pub access_unit_number: Option<u64>,
+    pub rtp_timestamp: Option<u32>,
+    pub first_sequence: Option<u16>,
+    pub last_sequence: Option<u16>,
+    pub sample_start_offset: Option<u64>,
+    pub sample_end_offset: Option<u64>,
+    pub packets: Vec<VideoPacketAssociation>,
+    pub packet_associations_truncated: bool,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct VideoPacketAssociation {
+    pub packet_number: u64,
+    pub rtp_sequence: u16,
+    pub offset_ms: u64,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct VideoParameterChange {
+    pub nalu_number: u64,
+    pub effective_access_unit: Option<u64>,
+    pub parameter_kind: String,
+    pub parameter_id: u32,
+    pub changed_fields: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]

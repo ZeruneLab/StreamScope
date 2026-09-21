@@ -545,6 +545,11 @@ pub fn render_html(result: &AnalysisResult) -> String {
         .h264
         .as_ref()
         .map(|h264| {
+            let mapped_nalus = h264
+                .nalus
+                .iter()
+                .filter(|nalu| !nalu.packets.is_empty())
+                .count();
             let dimensions = h264
                 .sps
                 .first()
@@ -562,16 +567,104 @@ pub fn render_html(result: &AnalysisResult) -> String {
                 })
                 .collect::<Vec<_>>()
                 .join("\n");
+            let parameter_changes = h264
+                .parameter_changes
+                .iter()
+                .map(|change| {
+                    format!(
+                        "<li><strong>{} #{}</strong>：NALU #{}，从 AU #{} 生效；变化字段 {}</li>",
+                        escape_html(&change.parameter_kind.to_uppercase()),
+                        change.parameter_id,
+                        change.nalu_number,
+                        change
+                            .effective_access_unit
+                            .map(|value| value.to_string())
+                            .unwrap_or_else(|| "未知".into()),
+                        escape_html(&change.changed_fields.join("、")),
+                    )
+                })
+                .collect::<Vec<_>>()
+                .join("\n");
+            let hrd = &h264.hrd_simulation;
+            let hrd_rows = hrd
+                .points
+                .iter()
+                .take(100)
+                .map(|point| {
+                    format!(
+                        "<tr><td>#{}</td><td>NALU #{}</td><td>{}</td><td>{} / {}</td><td>{} / {}</td><td>{}</td></tr>",
+                        point.access_unit,
+                        point.sei_nalu,
+                        point.access_unit_bits,
+                        point.cpb_removal_delay,
+                        point.dpb_output_delay,
+                        point.fullness_before_removal_bits,
+                        point.fullness_after_removal_bits,
+                        if point.overflow {
+                            "CPB 溢出"
+                        } else if point.underflow {
+                            "CPB 下溢"
+                        } else {
+                            "正常"
+                        },
+                    )
+                })
+                .collect::<Vec<_>>()
+                .join("");
+            let hrd_limitations = hrd
+                .limitations
+                .iter()
+                .map(|item| format!("<li>{}</li>", escape_html(item)))
+                .collect::<Vec<_>>()
+                .join("");
+            let hrd_html = format!(
+                "<h3>HRD / CPB 逐 AU 仿真</h3><dl><dt>状态</dt><dd>{}</dd><dt>Schedule / SPS</dt><dd>{} / {}</dd><dt>Buffering Period / Picture Timing</dt><dd>{} / {}</dd><dt>已仿真 AU</dt><dd>{}</dd><dt>最小 / 最大 fullness</dt><dd>{} / {} bits</dd><dt>溢出 / 下溢 / delay 不连续</dt><dd>{} / {} / {}</dd></dl><p>AU 大小按保留的 NALU 字节计算，不包含 RTP、容器及网络传输开销；证据不完整时不输出确定性 CPB 结论。</p><ul>{}</ul>{}",
+                match hrd.status.as_str() {
+                    "simulated_cbr_single_cpb" => "已完成单 CPB / CBR 仿真",
+                    "not_declared" => "SPS 未声明 HRD",
+                    _ => "证据不足",
+                },
+                escape_html(&hrd.schedule.to_uppercase()),
+                hrd.sps_id
+                    .map(|value| value.to_string())
+                    .unwrap_or_else(|| "—".into()),
+                hrd.buffering_period_count,
+                hrd.pic_timing_count,
+                hrd.simulated_aus,
+                hrd.minimum_fullness_bits
+                    .map(|value| value.to_string())
+                    .unwrap_or_else(|| "—".into()),
+                hrd.maximum_fullness_bits
+                    .map(|value| value.to_string())
+                    .unwrap_or_else(|| "—".into()),
+                hrd.overflow_aus.len(),
+                hrd.underflow_aus.len(),
+                hrd.delay_discontinuities.len(),
+                if hrd_limitations.is_empty() {
+                    "<li>无额外限制</li>"
+                } else {
+                    &hrd_limitations
+                },
+                if hrd_rows.is_empty() {
+                    String::new()
+                } else {
+                    format!("<table><thead><tr><th>AU</th><th>SEI</th><th>AU bits</th><th>Removal / Output delay</th><th>移除前 / 后 fullness</th><th>状态</th></tr></thead><tbody>{hrd_rows}</tbody></table>")
+                },
+            );
             format!(
-                "<section><h2>H.264 码流分析</h2><dl><dt>NALU</dt><dd>{}（完整 {} / 不完整 {}）</dd><dt>帧 / IDR</dt><dd>{} / {}</dd><dt>SPS 分辨率</dt><dd>{}</dd><dt>平均 / 最大 GOP</dt><dd>{} / {}</dd></dl><ul>{}</ul></section>",
+                "<section><h2>H.264 码流分析</h2><dl><dt>NALU</dt><dd>{}（完整 {} / 不完整 {}）</dd><dt>RTP→NALU 精确映射</dt><dd>{} / {} 个已保留 NALU</dd><dt>帧 / IDR</dt><dd>{} / {}</dd><dt>SPS 分辨率</dt><dd>{}</dd><dt>平均 / 最大 GOP</dt><dd>{} / {}</dd></dl>{}<h3>参数集变更</h3><ul>{}</ul><h3>结构异常</h3><ul>{}</ul></section>",
                 h264.nalu_count,
                 h264.complete_nalus,
                 h264.incomplete_nalus,
+                mapped_nalus,
+                h264.nalus.len(),
                 h264.frame_count,
                 h264.idr_frames,
                 escape_html(&dimensions),
                 h264.average_gop_frames.map(|value| value.to_string()).unwrap_or_else(|| "—".into()),
                 h264.maximum_gop_frames.map(|value| value.to_string()).unwrap_or_else(|| "—".into()),
+                hrd_html,
+                if parameter_changes.is_empty() { "<li>保留样本中未发现同一参数集 ID 的字段变化</li>" } else { &parameter_changes },
                 if issues.is_empty() { "<li>未发现 H.264 结构异常</li>" } else { &issues }
             )
         })
@@ -580,6 +673,11 @@ pub fn render_html(result: &AnalysisResult) -> String {
         .h265
         .as_ref()
         .map(|h265| {
+            let mapped_nalus = h265
+                .nalus
+                .iter()
+                .filter(|nalu| !nalu.packets.is_empty())
+                .count();
             let dimensions = h265
                 .sps
                 .first()
@@ -591,11 +689,31 @@ pub fn render_html(result: &AnalysisResult) -> String {
                 .map(|issue| format!("<li><strong>{}</strong>：{}</li>", escape_html(&issue.kind), escape_html(&issue.detail)))
                 .collect::<Vec<_>>()
                 .join("\n");
+            let parameter_changes = h265
+                .parameter_changes
+                .iter()
+                .map(|change| {
+                    format!(
+                        "<li><strong>{} #{}</strong>：NALU #{}，从 AU #{} 生效；变化字段 {}</li>",
+                        escape_html(&change.parameter_kind.to_uppercase()),
+                        change.parameter_id,
+                        change.nalu_number,
+                        change
+                            .effective_access_unit
+                            .map(|value| value.to_string())
+                            .unwrap_or_else(|| "未知".into()),
+                        escape_html(&change.changed_fields.join("、")),
+                    )
+                })
+                .collect::<Vec<_>>()
+                .join("\n");
             format!(
-                "<section><h2>H.265 / HEVC 码流分析</h2><dl><dt>NALU</dt><dd>{}（完整 {} / 不完整 {}）</dd><dt>帧 / IRAP</dt><dd>{} / {}</dd><dt>IDR / CRA</dt><dd>{} / {}</dd><dt>VPS / SPS / PPS</dt><dd>{} / {} / {}</dd><dt>SPS 分辨率</dt><dd>{}</dd><dt>平均 / 最大 GOP</dt><dd>{} / {}</dd></dl><ul>{}</ul></section>",
+                "<section><h2>H.265 / HEVC 码流分析</h2><dl><dt>NALU</dt><dd>{}（完整 {} / 不完整 {}）</dd><dt>RTP→NALU 精确映射</dt><dd>{} / {} 个已保留 NALU</dd><dt>帧 / IRAP</dt><dd>{} / {}</dd><dt>IDR / CRA</dt><dd>{} / {}</dd><dt>VPS / SPS / PPS</dt><dd>{} / {} / {}</dd><dt>SPS 分辨率</dt><dd>{}</dd><dt>平均 / 最大 GOP</dt><dd>{} / {}</dd></dl><h3>参数集变更</h3><ul>{}</ul><h3>结构异常</h3><ul>{}</ul></section>",
                 h265.nalu_count,
                 h265.complete_nalus,
                 h265.incomplete_nalus,
+                mapped_nalus,
+                h265.nalus.len(),
                 h265.frame_count,
                 h265.irap_frames,
                 h265.idr_frames,
@@ -606,6 +724,7 @@ pub fn render_html(result: &AnalysisResult) -> String {
                 escape_html(&dimensions),
                 h265.average_gop_frames.map(|value| value.to_string()).unwrap_or_else(|| "—".into()),
                 h265.maximum_gop_frames.map(|value| value.to_string()).unwrap_or_else(|| "—".into()),
+                if parameter_changes.is_empty() { "<li>保留样本中未发现同一参数集 ID 的字段变化</li>" } else { &parameter_changes },
                 if issues.is_empty() { "<li>未发现 H.265 结构异常</li>" } else { &issues }
             )
         })
@@ -616,6 +735,116 @@ pub fn render_html(result: &AnalysisResult) -> String {
                 String::new()
             }
         });
+    let recovery_windows = result
+        .h264
+        .as_ref()
+        .map(|analysis| analysis.recovery_windows.as_slice())
+        .or_else(|| {
+            result
+                .h265
+                .as_ref()
+                .map(|analysis| analysis.recovery_windows.as_slice())
+        })
+        .unwrap_or_default();
+    let recovery_windows_html = if recovery_windows.is_empty() {
+        String::new()
+    } else {
+        let rows = recovery_windows
+            .iter()
+            .take(200)
+            .map(|window| {
+                format!(
+                    "<tr><td>#{}</td><td>{}</td><td>{}</td><td>{}</td><td>{}</td><td>{}</td></tr>",
+                    window.source_frame,
+                    escape_html(&window.source_kind),
+                    window
+                        .next_random_access_frame
+                        .map(|value| format!("#{value}"))
+                        .unwrap_or_else(|| "未观察到".into()),
+                    window
+                        .wait_frames
+                        .map(|value| format!("{value} 帧"))
+                        .unwrap_or_else(|| "不可计算".into()),
+                    window
+                        .wait_ms
+                        .map(|value| format!("{value} ms"))
+                        .unwrap_or_else(|| "不可计算".into()),
+                    if window.visual_status == "post_access_anomaly_candidate" {
+                        "随机接入后仍有画面异常候选"
+                    } else {
+                        "未确认画面恢复"
+                    },
+                )
+            })
+            .collect::<Vec<_>>()
+            .join("");
+        format!(
+            "<section><h2>传播与恢复窗口</h2><p>IDR/CRA 仅表示结构恢复机会；没有参考真值时不将其写成画面已恢复。</p><table><thead><tr><th>异常起点</th><th>证据类型</th><th>下一随机接入</th><th>等待帧数</th><th>等待时间</th><th>画面状态</th></tr></thead><tbody>{rows}</tbody></table></section>"
+        )
+    };
+    let video_deep_html = result
+        .h264
+        .as_ref()
+        .and_then(|analysis| analysis.deep_analysis.as_ref())
+        .or_else(|| {
+            result
+                .h265
+                .as_ref()
+                .and_then(|analysis| analysis.deep_analysis.as_ref())
+        })
+        .map(|analysis| {
+            let capabilities = analysis
+                .capabilities
+                .iter()
+                .map(|capability| {
+                    format!(
+                        "<tr><td>{}</td><td>{}</td><td>{}</td></tr>",
+                        escape_html(&capability.label),
+                        match capability.status.as_str() {
+                            "available" => "可用",
+                            "on_demand" => "按帧加载",
+                            _ => "尚不可用",
+                        },
+                        escape_html(capability.reason.as_deref().unwrap_or("—")),
+                    )
+                })
+                .collect::<Vec<_>>()
+                .join("");
+            let frames = analysis
+                .frames
+                .iter()
+                .take(200)
+                .map(|frame| {
+                    format!(
+                        "<tr><td>#{}</td><td>{}</td><td>{}</td><td>{}</td><td>{}</td><td>{} / {} B</td></tr>",
+                        frame.display_index,
+                        frame.decode_index.map(|value| value.to_string()).unwrap_or_else(|| "—".into()),
+                        escape_html(frame.picture_type.as_deref().unwrap_or("—")),
+                        frame.pts_ms.map(|value| format!("{value} ms")).unwrap_or_else(|| "—".into()),
+                        frame.dts_ms.map(|value| format!("{value} ms")).unwrap_or_else(|| "—".into()),
+                        frame.packet_position.map(|value| value.to_string()).unwrap_or_else(|| "—".into()),
+                        frame.packet_size.map(|value| value.to_string()).unwrap_or_else(|| "—".into()),
+                    )
+                })
+                .collect::<Vec<_>>()
+                .join("");
+            let limitations = analysis
+                .limitations
+                .iter()
+                .map(|item| format!("<li>{}</li>", escape_html(item)))
+                .collect::<Vec<_>>()
+                .join("");
+            format!(
+                "<section><h2>视频深度分析</h2><dl><dt>编码</dt><dd>{}</dd><dt>已索引帧</dt><dd>{}</dd><dt>覆盖状态</dt><dd>{}</dd></dl><h3>能力声明</h3><table><thead><tr><th>能力</th><th>状态</th><th>说明</th></tr></thead><tbody>{}</tbody></table><h3>逐帧索引（前 200 帧）</h3><table><thead><tr><th>显示序号</th><th>编码序号</th><th>帧型</th><th>PTS</th><th>DTS</th><th>位置 / 大小</th></tr></thead><tbody>{}</tbody></table><ul>{}</ul></section>",
+                escape_html(&analysis.codec),
+                analysis.indexed_frames,
+                if analysis.coverage_complete { "完整" } else { "受限" },
+                capabilities,
+                frames,
+                limitations,
+            )
+        })
+        .unwrap_or_default();
     let issues = result
         .decode
         .as_ref()
@@ -887,6 +1116,8 @@ pub fn render_html(result: &AnalysisResult) -> String {
   {protocol_html}
   {h264_html}
   {h265_html}
+  {recovery_windows_html}
+  {video_deep_html}
   <section><h2>诊断结论</h2>{diagnostics}</section>
   <section><h2>统一时间线</h2><ol class="timeline">{timeline}</ol></section>
   {ffmpeg_evidence_html}
@@ -1684,6 +1915,62 @@ mod tests {
         assert!(html.contains("音频分析 · rtsp-track-3"));
         assert!(html.contains("Payload Type 8"));
         assert!(html.contains("Payload Type 111"));
+    }
+
+    #[test]
+    fn renders_structural_recovery_without_claiming_visual_recovery() {
+        let mut result = sample_result();
+        result.h264 = Some(streamscope_core::H264Analysis {
+            recovery_windows: vec![streamscope_core::VideoRecoveryWindow {
+                source_frame: 10,
+                source_kind: "missing_reference".into(),
+                next_random_access_frame: Some(140),
+                wait_frames: Some(130),
+                wait_ms: Some(5_200),
+                structural_status: "random_access_observed".into(),
+                visual_status: "not_confirmed".into(),
+                ..streamscope_core::VideoRecoveryWindow::default()
+            }],
+            ..streamscope_core::H264Analysis::default()
+        });
+        let html = render_html(&result);
+        assert!(html.contains("传播与恢复窗口"));
+        assert!(html.contains("#140"));
+        assert!(html.contains("5200 ms"));
+        assert!(html.contains("未确认画面恢复"));
+    }
+
+    #[test]
+    fn renders_h264_hrd_simulation_and_its_evidence_boundary() {
+        let mut result = sample_result();
+        result.h264 = Some(streamscope_core::H264Analysis {
+            hrd_simulation: streamscope_core::H264HrdSimulation {
+                status: "simulated_cbr_single_cpb".into(),
+                schedule: "nal".into(),
+                sps_id: Some(0),
+                buffering_period_count: 1,
+                pic_timing_count: 2,
+                simulated_aus: 2,
+                minimum_fullness_bits: Some(10_000),
+                maximum_fullness_bits: Some(90_000),
+                underflow_aus: vec![2],
+                points: vec![streamscope_core::H264HrdAuPoint {
+                    access_unit: 2,
+                    sei_nalu: 4,
+                    access_unit_bits: 120_000,
+                    cpb_removal_delay: 1,
+                    fullness_before_removal_bits: 100_000,
+                    underflow: true,
+                    ..streamscope_core::H264HrdAuPoint::default()
+                }],
+                ..streamscope_core::H264HrdSimulation::default()
+            },
+            ..streamscope_core::H264Analysis::default()
+        });
+        let html = render_html(&result);
+        assert!(html.contains("已完成单 CPB / CBR 仿真"));
+        assert!(html.contains("AU 大小按保留的 NALU 字节计算"));
+        assert!(html.contains("CPB 下溢"));
     }
 
     #[test]

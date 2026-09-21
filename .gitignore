@@ -9,6 +9,7 @@
 # Tauri generated files and staged FFmpeg sidecars
 /apps/desktop/src-tauri/gen/schemas/
 /apps/desktop/src-tauri/binaries/*.exe
+/apps/desktop/src-tauri/binaries/*.dll
 /apps/desktop/src-tauri/binaries/FFmpeg-LICENSE.txt
 /apps/desktop/src-tauri/binaries/FFmpeg-README.txt
 

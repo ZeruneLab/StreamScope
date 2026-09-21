@@ -1,5 +1,5 @@
 use crate::bit::{BitError, BitReader, ebsp_to_rbsp};
-use streamscope_core::{H264PpsInfo, H264SpsInfo};
+use streamscope_core::{H264CpbEntry, H264HrdInfo, H264PpsInfo, H264SpsInfo};
 
 #[derive(Debug, thiserror::Error)]
 pub enum ParameterError {
@@ -11,6 +11,8 @@ pub enum ParameterError {
     DimensionOverflow,
     #[error("PPS slice group map 不受支持")]
     UnsupportedSliceGroups,
+    #[error("H.264 HRD cpb_cnt_minus1 超过标准上限 31")]
+    InvalidHrdCpbCount,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -29,7 +31,7 @@ pub fn parse_sps(nalu: &[u8]) -> Result<H264SpsInfo, ParameterError> {
     let rbsp = ebsp_to_rbsp(&nalu[1..]);
     let mut bits = BitReader::new(&rbsp);
     let profile_idc = bits.read_bits(8)? as u8;
-    let _constraint_flags = bits.read_bits(8)?;
+    let constraint_flags = bits.read_bits(8)? as u8;
     let level_idc = bits.read_bits(8)? as u8;
     let id = bits.read_ue()?;
     let mut chroma_format_idc = 1;
@@ -90,8 +92,8 @@ pub fn parse_sps(nalu: &[u8]) -> Result<H264SpsInfo, ParameterError> {
     } else {
         None
     };
-    let fps_milli = if bits.read_bit()? {
-        parse_vui_fps(&mut bits)?
+    let vui = if bits.read_bit()? {
+        Some(parse_vui(&mut bits)?)
     } else {
         None
     };
@@ -131,6 +133,7 @@ pub fn parse_sps(nalu: &[u8]) -> Result<H264SpsInfo, ParameterError> {
         id,
         profile_idc,
         level_idc,
+        constraint_set3_flag: constraint_flags & 0x10 != 0,
         chroma_format_idc,
         bit_depth_luma,
         bit_depth_chroma,
@@ -140,7 +143,13 @@ pub fn parse_sps(nalu: &[u8]) -> Result<H264SpsInfo, ParameterError> {
         width,
         height,
         progressive: frame_mbs_only,
-        fps_milli,
+        fps_milli: vui.as_ref().and_then(|value| value.fps_milli),
+        num_units_in_tick: vui.as_ref().and_then(|value| value.num_units_in_tick),
+        time_scale: vui.as_ref().and_then(|value| value.time_scale),
+        nal_hrd: vui.as_ref().and_then(|value| value.nal_hrd.clone()),
+        vcl_hrd: vui.as_ref().and_then(|value| value.vcl_hrd.clone()),
+        max_num_reorder_frames: vui.as_ref().and_then(|value| value.max_num_reorder_frames),
+        max_dec_frame_buffering: vui.as_ref().and_then(|value| value.max_dec_frame_buffering),
     })
 }
 
@@ -241,7 +250,18 @@ fn skip_slice_groups(bits: &mut BitReader<'_>, groups: u32) -> Result<(), Parame
     Ok(())
 }
 
-fn parse_vui_fps(bits: &mut BitReader<'_>) -> Result<Option<u32>, BitError> {
+#[derive(Default)]
+struct ParsedVui {
+    fps_milli: Option<u32>,
+    num_units_in_tick: Option<u32>,
+    time_scale: Option<u32>,
+    nal_hrd: Option<H264HrdInfo>,
+    vcl_hrd: Option<H264HrdInfo>,
+    max_num_reorder_frames: Option<u32>,
+    max_dec_frame_buffering: Option<u32>,
+}
+
+fn parse_vui(bits: &mut BitReader<'_>) -> Result<ParsedVui, ParameterError> {
     if bits.read_bit()? {
         let aspect_ratio_idc = bits.read_bits(8)?;
         if aspect_ratio_idc == 255 {
@@ -265,18 +285,84 @@ fn parse_vui_fps(bits: &mut BitReader<'_>) -> Result<Option<u32>, BitError> {
         let _chroma_sample_loc_top = bits.read_ue()?;
         let _chroma_sample_loc_bottom = bits.read_ue()?;
     }
-    if !bits.read_bit()? {
-        return Ok(None);
+    let (fps_milli, num_units_in_tick, time_scale) = if bits.read_bit()? {
+        let num_units_in_tick = bits.read_bits(32)?;
+        let time_scale = bits.read_bits(32)?;
+        let _fixed_frame_rate = bits.read_bit()?;
+        (
+            (num_units_in_tick != 0).then(|| {
+                (u64::from(time_scale) * 1000 / (2 * u64::from(num_units_in_tick))) as u32
+            }),
+            Some(num_units_in_tick),
+            Some(time_scale),
+        )
+    } else {
+        (None, None, None)
+    };
+    let nal_hrd = bits.read_bit()?.then(|| parse_hrd(bits)).transpose()?;
+    let vcl_hrd = bits.read_bit()?.then(|| parse_hrd(bits)).transpose()?;
+    if nal_hrd.is_some() || vcl_hrd.is_some() {
+        let _low_delay_hrd = bits.read_bit()?;
     }
-    let num_units_in_tick = bits.read_bits(32)?;
-    let time_scale = bits.read_bits(32)?;
-    let _fixed_frame_rate = bits.read_bit()?;
-    if num_units_in_tick == 0 {
-        return Ok(None);
+    let _pic_struct_present = bits.read_bit()?;
+    let (max_num_reorder_frames, max_dec_frame_buffering) = if bits.read_bit()? {
+        let _motion_vectors_over_pic_boundaries = bits.read_bit()?;
+        let _max_bytes_per_pic_denom = bits.read_ue()?;
+        let _max_bits_per_mb_denom = bits.read_ue()?;
+        let _log2_max_mv_length_horizontal = bits.read_ue()?;
+        let _log2_max_mv_length_vertical = bits.read_ue()?;
+        (Some(bits.read_ue()?), Some(bits.read_ue()?))
+    } else {
+        (None, None)
+    };
+    Ok(ParsedVui {
+        fps_milli,
+        num_units_in_tick,
+        time_scale,
+        nal_hrd,
+        vcl_hrd,
+        max_num_reorder_frames,
+        max_dec_frame_buffering,
+    })
+}
+
+fn parse_hrd(bits: &mut BitReader<'_>) -> Result<H264HrdInfo, ParameterError> {
+    let cpb_count = bits.read_ue()?.saturating_add(1);
+    if cpb_count > 32 {
+        return Err(ParameterError::InvalidHrdCpbCount);
     }
-    Ok(Some(
-        (u64::from(time_scale) * 1000 / (2 * u64::from(num_units_in_tick))) as u32,
-    ))
+    let bit_rate_scale = bits.read_bits(4)?;
+    let cpb_size_scale = bits.read_bits(4)?;
+    let mut maximum_bit_rate_bps = 0_u64;
+    let mut maximum_cpb_size_bits = 0_u64;
+    let mut all_cbr = true;
+    let mut entries = Vec::with_capacity(cpb_count as usize);
+    for _ in 0..cpb_count {
+        let bit_rate_value = u64::from(bits.read_ue()?) + 1;
+        let cpb_size_value = u64::from(bits.read_ue()?) + 1;
+        let bit_rate_bps = bit_rate_value << (6 + bit_rate_scale);
+        let cpb_size_bits = cpb_size_value << (4 + cpb_size_scale);
+        let cbr = bits.read_bit()?;
+        maximum_bit_rate_bps = maximum_bit_rate_bps.max(bit_rate_bps);
+        maximum_cpb_size_bits = maximum_cpb_size_bits.max(cpb_size_bits);
+        all_cbr &= cbr;
+        entries.push(H264CpbEntry {
+            bit_rate_bps,
+            cpb_size_bits,
+            cbr,
+        });
+    }
+    Ok(H264HrdInfo {
+        cpb_count,
+        maximum_bit_rate_bps,
+        maximum_cpb_size_bits,
+        all_cbr,
+        entries,
+        initial_cpb_removal_delay_length: bits.read_bits(5)? as u8 + 1,
+        cpb_removal_delay_length: bits.read_bits(5)? as u8 + 1,
+        dpb_output_delay_length: bits.read_bits(5)? as u8 + 1,
+        time_offset_length: bits.read_bits(5)? as u8,
+    })
 }
 
 #[cfg(test)]
@@ -307,6 +393,96 @@ mod tests {
         assert_eq!((sps.width, sps.height), (320, 240));
         assert_eq!(sps.max_frame_num, 16);
         assert!(sps.progressive);
+        assert!(!sps.constraint_set3_flag);
+    }
+
+    #[test]
+    fn preserves_constraint_set3_for_level_1b() {
+        let mut writer = BitWriter::default();
+        writer.bits(66, 8);
+        writer.bits(0x10, 8);
+        writer.bits(11, 8);
+        writer.ue(0);
+        writer.ue(0);
+        writer.ue(0);
+        writer.ue(0);
+        writer.ue(1);
+        writer.bit(false);
+        writer.ue(19);
+        writer.ue(14);
+        writer.bit(true);
+        writer.bit(true);
+        writer.bit(false);
+        writer.bit(false);
+        let mut nalu = vec![0x67];
+        nalu.extend(writer.finish());
+
+        let sps = parse_sps(&nalu).unwrap();
+        assert_eq!(sps.level_idc, 11);
+        assert!(sps.constraint_set3_flag);
+    }
+
+    #[test]
+    fn parses_vui_hrd_and_bitstream_restrictions() {
+        let mut writer = BitWriter::default();
+        writer.bits(66, 8);
+        writer.bits(0, 8);
+        writer.bits(30, 8);
+        writer.ue(0);
+        writer.ue(0);
+        writer.ue(0);
+        writer.ue(0);
+        writer.ue(1);
+        writer.bit(false);
+        writer.ue(19);
+        writer.ue(14);
+        writer.bit(true);
+        writer.bit(true);
+        writer.bit(false);
+        writer.bit(true);
+        writer.bit(false);
+        writer.bit(false);
+        writer.bit(false);
+        writer.bit(false);
+        writer.bit(true);
+        writer.bits(1, 32);
+        writer.bits(50, 32);
+        writer.bit(true);
+        writer.bit(true);
+        writer.ue(0);
+        writer.bits(0, 4);
+        writer.bits(0, 4);
+        writer.ue(999);
+        writer.ue(1_999);
+        writer.bit(true);
+        writer.bits(23, 5);
+        writer.bits(23, 5);
+        writer.bits(23, 5);
+        writer.bits(24, 5);
+        writer.bit(false);
+        writer.bit(false);
+        writer.bit(false);
+        writer.bit(true);
+        writer.bit(true);
+        writer.ue(2);
+        writer.ue(1);
+        writer.ue(16);
+        writer.ue(16);
+        writer.ue(0);
+        writer.ue(1);
+        let mut nalu = vec![0x67];
+        nalu.extend(writer.finish());
+
+        let sps = parse_sps(&nalu).unwrap();
+        assert_eq!(sps.fps_milli, Some(25_000));
+        let hrd = sps.nal_hrd.unwrap();
+        assert_eq!(hrd.cpb_count, 1);
+        assert_eq!(hrd.maximum_bit_rate_bps, 64_000);
+        assert_eq!(hrd.maximum_cpb_size_bits, 32_000);
+        assert!(hrd.all_cbr);
+        assert_eq!(hrd.cpb_removal_delay_length, 24);
+        assert_eq!(sps.max_num_reorder_frames, Some(0));
+        assert_eq!(sps.max_dec_frame_buffering, Some(1));
     }
 
     #[test]

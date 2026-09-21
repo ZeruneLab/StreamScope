@@ -13,7 +13,7 @@ pub struct RuleDefinition {
     pub verification: &'static str,
 }
 
-const RULES: [RuleDefinition; 48] = [
+const RULES: [RuleDefinition; 55] = [
     rule(
         "RTSP-001",
         "RTSP 服务不可达",
@@ -286,12 +286,12 @@ const RULES: [RuleDefinition; 48] = [
     ),
     rule(
         "REC-031",
-        "异常后恢复过慢",
+        "下一随机接入机会等待过长",
         "恢复",
         DiagnosticSeverity::Medium,
-        "短暂故障会放大为长时间不可用。",
+        "预测链受损后可能持续到较晚的 IDR/CRA 才获得结构恢复机会。",
         "缩短 GOP，并确保参数集随 IDR 重发。",
-        "注入一次可控丢包并测量恢复时间。",
+        "注入一次可控丢包并区分测量随机接入机会与实际画面恢复时间。",
     ),
     rule(
         "CMP-032",
@@ -373,6 +373,69 @@ const RULES: [RuleDefinition; 48] = [
         "未重新初始化解码器可能导致花屏或停画。",
         "变更参数时发送新参数集和随机接入帧。",
         "在变化点验证播放器是否重新初始化。",
+    ),
+    rule(
+        "H264-049",
+        "H.264 参数集字段变化",
+        "H.264",
+        DiagnosticSeverity::Medium,
+        "Profile、位深、参考帧或编码工具变化时，未重新配置的解码器可能产生兼容性问题。",
+        "在参数变化点发送完整 SPS/PPS 和 IDR，并确认接收端重新初始化。",
+        "按报告中的 NALU、AU 和字段列表复核码流，并在变化点连续回放。",
+    ),
+    rule(
+        "H265-050",
+        "H.265 参数集字段变化",
+        "H.265",
+        DiagnosticSeverity::Medium,
+        "Profile、层级、位深或编码结构变化时，未重新配置的解码器可能产生兼容性问题。",
+        "在参数变化点发送完整 VPS/SPS/PPS 和随机接入帧，并确认接收端重新初始化。",
+        "按报告中的 NALU、AU 和字段列表复核码流，并在变化点连续回放。",
+    ),
+    rule(
+        "H264-051",
+        "H.264 SPS 参考帧数超过 Level DPB 上限",
+        "H.264",
+        DiagnosticSeverity::High,
+        "严格按 SPS Level 分配解码缓冲的播放器可能拒绝该流、丢弃参考帧或解码异常。",
+        "降低 max_num_ref_frames，或为当前分辨率声明并满足更高的 Level。",
+        "用标准校验器复核 SPS，并在目标硬件解码器上验证连续播放和随机接入。",
+    ),
+    rule(
+        "H265-052",
+        "H.265 SPS 解码图像缓冲超过 Level 上限",
+        "H.265",
+        DiagnosticSeverity::High,
+        "严格按 SPS Level 分配解码缓冲的播放器可能拒绝该流或无法保留完整参考图像集合。",
+        "降低 sps_max_dec_pic_buffering，或为当前分辨率声明并满足更高的 Level。",
+        "用 HEVC 标准校验器复核 SPS，并在目标硬件解码器上验证参考帧密集场景。",
+    ),
+    rule(
+        "H264-053",
+        "H.264 VUI 解码缓冲约束矛盾",
+        "H.264",
+        DiagnosticSeverity::High,
+        "播放器无法同时满足相互矛盾的参考帧、重排序帧和解码缓冲声明，可能拒绝码流或出现不一致的帧输出。",
+        "修正 SPS VUI bitstream_restriction 参数，使 max_dec_frame_buffering 不小于参考帧数且不小于 max_num_reorder_frames。",
+        "重新编码后复核 SPS，并在严格硬件解码器上验证启动、随机接入和连续播放。",
+    ),
+    rule(
+        "H264-054",
+        "H.264 实测平均码率超过 HRD 声明",
+        "H.264",
+        DiagnosticSeverity::High,
+        "按 SPS HRD 配置缓冲的接收端可能发生 CPB 溢出、丢帧或播放不连续。",
+        "提高 HRD bit_rate_value 声明或限制编码器输出码率，并保留足够的 CPB 容量。",
+        "用至少一秒的完整样本复测；如需证明瞬时 CPB 溢出，再结合 Buffering Period/Picture Timing SEI 做逐 AU 仿真。",
+    ),
+    rule(
+        "H264-055",
+        "H.264 HRD CPB 逐 AU 仿真越界",
+        "H.264",
+        DiagnosticSeverity::High,
+        "按 SPS HRD 参数和 SEI 时序运行的接收端可能发生 CPB 溢出或下溢，表现为丢帧、停顿或播放失败。",
+        "核对编码器 HRD、VBV/CPB 和码率控制配置，并确保每个访问单元的 Buffering Period/Picture Timing SEI 连续有效。",
+        "使用相同参数重新编码后复测，确认完整仿真范围内不再出现 CPB 溢出、下溢或 removal delay 不连续。",
     ),
     rule(
         "VIS-041",
@@ -592,6 +655,96 @@ pub fn build_timeline(result: &AnalysisResult) -> Vec<TimelineEvent> {
                 detail: issue.detail.clone(),
             });
         }
+        for change in &h264.parameter_changes {
+            let nalu = h264
+                .nalus
+                .iter()
+                .find(|nalu| nalu.nalu_number == change.nalu_number);
+            events.push(TimelineEvent {
+                offset_ms: nalu
+                    .and_then(|nalu| nalu.packets.first().map(|packet| packet.offset_ms)),
+                source: "H264".into(),
+                event_type: "parameter_set_changed".into(),
+                severity: DiagnosticSeverity::Medium,
+                sequence: nalu.and_then(|nalu| nalu.first_sequence),
+                rtp_timestamp: nalu.and_then(|nalu| nalu.rtp_timestamp),
+                frame_number: change.effective_access_unit,
+                first_packet: nalu
+                    .and_then(|nalu| nalu.packets.first().map(|packet| packet.packet_number)),
+                last_packet: nalu
+                    .and_then(|nalu| nalu.packets.last().map(|packet| packet.packet_number)),
+                location_precision: Some(
+                    if nalu.is_some_and(|nalu| !nalu.packets.is_empty()) {
+                        "exact_capture_packet_and_access_unit"
+                    } else {
+                        "exact_nalu_and_access_unit"
+                    }
+                    .into(),
+                ),
+                detail: format!(
+                    "{} #{} 在 NALU #{} 更新，从 AU #{} 生效；变化字段：{}",
+                    change.parameter_kind.to_uppercase(),
+                    change.parameter_id,
+                    change.nalu_number,
+                    change
+                        .effective_access_unit
+                        .map(|value| value.to_string())
+                        .unwrap_or_else(|| "未知".into()),
+                    change.changed_fields.join("、")
+                ),
+            });
+        }
+        for point in h264.hrd_simulation.points.iter().filter(|point| {
+            h264.hrd_simulation.status == "simulated_cbr_single_cpb"
+                && (point.overflow || point.underflow)
+        }) {
+            let frame = h264
+                .frames
+                .iter()
+                .find(|frame| frame.frame_number == point.access_unit);
+            for (event_type, detail) in [
+                (
+                    point.overflow.then_some("cpb_overflow"),
+                    format!(
+                        "AU #{} 移除前 CPB fullness {} bits 超过声明容量",
+                        point.access_unit, point.fullness_before_removal_bits
+                    ),
+                ),
+                (
+                    point.underflow.then_some("cpb_underflow"),
+                    format!(
+                        "AU #{} 需要 {} bits，但移除前 CPB fullness 仅 {} bits",
+                        point.access_unit,
+                        point.access_unit_bits,
+                        point.fullness_before_removal_bits
+                    ),
+                ),
+            ] {
+                let Some(event_type) = event_type else {
+                    continue;
+                };
+                events.push(TimelineEvent {
+                    offset_ms: frame.and_then(|frame| frame.first_offset_ms),
+                    source: "H264 HRD".into(),
+                    event_type: event_type.into(),
+                    severity: DiagnosticSeverity::High,
+                    sequence: frame.and_then(|frame| frame.first_sequence),
+                    rtp_timestamp: frame.and_then(|frame| frame.rtp_timestamp),
+                    frame_number: Some(point.access_unit),
+                    first_packet: frame.and_then(|frame| frame.first_packet),
+                    last_packet: frame.and_then(|frame| frame.last_packet),
+                    location_precision: Some(
+                        if frame.and_then(|frame| frame.first_packet).is_some() {
+                            "exact_access_unit_and_capture_packet"
+                        } else {
+                            "exact_access_unit"
+                        }
+                        .into(),
+                    ),
+                    detail,
+                });
+            }
+        }
     }
     if let Some(h265) = &result.h265 {
         for issue in &h265.issues {
@@ -616,6 +769,45 @@ pub fn build_timeline(result: &AnalysisResult) -> Vec<TimelineEvent> {
                 last_packet: None,
                 location_precision: None,
                 detail: issue.detail.clone(),
+            });
+        }
+        for change in &h265.parameter_changes {
+            let nalu = h265
+                .nalus
+                .iter()
+                .find(|nalu| nalu.nalu_number == change.nalu_number);
+            events.push(TimelineEvent {
+                offset_ms: nalu
+                    .and_then(|nalu| nalu.packets.first().map(|packet| packet.offset_ms)),
+                source: "H265".into(),
+                event_type: "parameter_set_changed".into(),
+                severity: DiagnosticSeverity::Medium,
+                sequence: nalu.and_then(|nalu| nalu.first_sequence),
+                rtp_timestamp: nalu.and_then(|nalu| nalu.rtp_timestamp),
+                frame_number: change.effective_access_unit,
+                first_packet: nalu
+                    .and_then(|nalu| nalu.packets.first().map(|packet| packet.packet_number)),
+                last_packet: nalu
+                    .and_then(|nalu| nalu.packets.last().map(|packet| packet.packet_number)),
+                location_precision: Some(
+                    if nalu.is_some_and(|nalu| !nalu.packets.is_empty()) {
+                        "exact_capture_packet_and_access_unit"
+                    } else {
+                        "exact_nalu_and_access_unit"
+                    }
+                    .into(),
+                ),
+                detail: format!(
+                    "{} #{} 在 NALU #{} 更新，从 AU #{} 生效；变化字段：{}",
+                    change.parameter_kind.to_uppercase(),
+                    change.parameter_id,
+                    change.nalu_number,
+                    change
+                        .effective_access_unit
+                        .map(|value| value.to_string())
+                        .unwrap_or_else(|| "未知".into()),
+                    change.changed_fields.join("、")
+                ),
             });
         }
     }
@@ -756,7 +948,7 @@ pub fn build_timeline(result: &AnalysisResult) -> Vec<TimelineEvent> {
                     .map(|(first, last)| format!("，关联抓包 #{}–#{}", first, last))
                     .unwrap_or_default();
                 let location_note = if visual_candidate {
-                    "按 4 fps 缩略画面扫描定位，仅代表候选时间点"
+                    "按 8 fps 缩略画面扫描定位，仅代表候选时间点"
                 } else if location.precision == "filter_timestamp_nearest_frame" {
                     "按画面检测器时间戳关联到邻近帧，属于候选区间"
                 } else {
@@ -816,6 +1008,62 @@ pub fn build_timeline(result: &AnalysisResult) -> Vec<TimelineEvent> {
                 }
             }
         }
+    }
+    let recovery_windows = result
+        .h264
+        .as_ref()
+        .map(|analysis| analysis.recovery_windows.as_slice())
+        .or_else(|| {
+            result
+                .h265
+                .as_ref()
+                .map(|analysis| analysis.recovery_windows.as_slice())
+        })
+        .unwrap_or_default();
+    for window in recovery_windows {
+        let Some(frame_number) = window.next_random_access_frame else {
+            continue;
+        };
+        if events.iter().any(|event| {
+            event.event_type == "next_random_access_opportunity"
+                && event.frame_number == Some(frame_number)
+                && event.detail.contains(&format!("#{}", window.source_frame))
+        }) {
+            continue;
+        }
+        events.push(TimelineEvent {
+            offset_ms: window.next_random_access_offset_ms,
+            source: if result.h265.is_some() {
+                "H265"
+            } else {
+                "H264"
+            }
+            .into(),
+            event_type: "next_random_access_opportunity".into(),
+            severity: DiagnosticSeverity::Info,
+            sequence: None,
+            rtp_timestamp: None,
+            frame_number: Some(frame_number),
+            first_packet: window.first_packet,
+            last_packet: window.last_packet,
+            location_precision: Some("structured_recovery_window".into()),
+            detail: format!(
+                "异常起点 #{}（{}）后观察到随机接入帧 #{}，等待 {} 帧{}；画面恢复状态：{}",
+                window.source_frame,
+                window.source_kind,
+                frame_number,
+                window.wait_frames.unwrap_or(0),
+                window
+                    .wait_ms
+                    .map(|value| format!(" / {value} ms"))
+                    .unwrap_or_default(),
+                if window.visual_status == "post_access_anomaly_candidate" {
+                    "随机接入后仍有异常候选"
+                } else {
+                    "未确认"
+                }
+            ),
+        });
     }
     for error in &result.errors {
         events.push(TimelineEvent {
@@ -894,6 +1142,67 @@ fn severity_for_decode_issue(kind: &str) -> DiagnosticSeverity {
         }
         _ => DiagnosticSeverity::Low,
     }
+}
+
+fn h264_level_max_reference_frames(sps: &streamscope_core::H264SpsInfo) -> Option<u32> {
+    let max_dpb_mbs = match sps.level_idc {
+        10 => 396,
+        11 if sps.constraint_set3_flag => 396,
+        11 => 900,
+        12 | 13 | 20 => 2_376,
+        21 => 4_752,
+        22 | 30 => 8_100,
+        31 => 18_000,
+        32 => 20_480,
+        40 | 41 => 32_768,
+        42 => 34_816,
+        50 => 110_400,
+        51 | 52 => 184_320,
+        60..=62 => 696_320,
+        _ => return None,
+    };
+    let picture_mbs = sps
+        .width
+        .div_ceil(16)
+        .checked_mul(sps.height.div_ceil(16))?;
+    if picture_mbs == 0 {
+        return None;
+    }
+    let maximum = (max_dpb_mbs / picture_mbs).min(16);
+    let declared_buffering = sps
+        .max_dec_frame_buffering
+        .unwrap_or(sps.max_num_ref_frames);
+    (sps.max_num_ref_frames > maximum || declared_buffering > maximum).then_some(maximum)
+}
+
+fn h265_level_max_dpb_frames(sps: &streamscope_core::H265SpsInfo) -> Option<u32> {
+    let max_luma_samples = match sps.level_idc {
+        30 => 36_864_u64,
+        60 => 122_880,
+        63 => 245_760,
+        90 => 552_960,
+        93 => 983_040,
+        120 | 123 => 2_228_224,
+        150 | 153 | 156 => 8_912_896,
+        180 | 183 | 186 => 35_651_584,
+        _ => return None,
+    };
+    let picture_samples = u64::from(sps.width).checked_mul(u64::from(sps.height))?;
+    if picture_samples == 0 || picture_samples > max_luma_samples {
+        return None;
+    }
+    let maximum = if picture_samples <= max_luma_samples / 4 {
+        16
+    } else if picture_samples <= max_luma_samples / 2 {
+        12
+    } else if picture_samples <= max_luma_samples * 3 / 4 {
+        8
+    } else {
+        6
+    };
+    sps.max_dec_pic_buffering
+        .filter(|declared| *declared > maximum)
+        .map(|_| maximum)
 }
 
 fn evidence_for(
@@ -1077,11 +1386,44 @@ fn evidence_for(
             "至少一个访问单元未观察到 RTP Marker。".into(),
             one("H.264 异常", "missing_marker".into()),
         )),
-        "H264-022" if h264.is_some_and(|v| v.incomplete_nalus > 0) => Some((
-            95,
-            "存在未完整重组的 H.264 NALU。".into(),
-            one("不完整 NALU", h264?.incomplete_nalus.to_string()),
-        )),
+        "H264-022" if h264.is_some_and(|v| v.incomplete_nalus > 0) => {
+            let analysis = h264?;
+            let mut evidence = one("不完整 NALU", analysis.incomplete_nalus.to_string());
+            if let Some(nalu) = analysis.nalus.iter().find(|nalu| !nalu.complete) {
+                evidence.push(DiagnosticEvidence {
+                    label: "首个不完整 NALU".into(),
+                    value: format!(
+                        "#{} {}，AU {}，RTP Seq {}→{}",
+                        nalu.nalu_number,
+                        nalu.type_name,
+                        nalu.access_unit_number
+                            .map(|value| value.to_string())
+                            .unwrap_or_else(|| "未知".into()),
+                        nalu.first_sequence
+                            .map(|value| value.to_string())
+                            .unwrap_or_else(|| "未知".into()),
+                        nalu.last_sequence
+                            .map(|value| value.to_string())
+                            .unwrap_or_else(|| "未知".into())
+                    ),
+                });
+                if !nalu.packets.is_empty() {
+                    evidence.push(DiagnosticEvidence {
+                        label: "已捕获包".into(),
+                        value: nalu
+                            .packets
+                            .iter()
+                            .take(20)
+                            .map(|packet| {
+                                format!("#{}(Seq {})", packet.packet_number, packet.rtp_sequence)
+                            })
+                            .collect::<Vec<_>>()
+                            .join("、"),
+                    });
+                }
+            }
+            Some((95, "存在未完整重组的 H.264 NALU。".into(), evidence))
+        }
         "H264-023" if h264.is_some_and(|v| v.first_frame_is_idr == Some(false)) => Some((
             95,
             "采样到的首个视频帧不是 IDR。".into(),
@@ -1135,6 +1477,60 @@ fn evidence_for(
             "FFmpeg 日志包含宏块或错误隐藏证据。".into(),
             decode_evidence(result, &["macroblock", "concealment", "mb_type"]),
         )),
+        "REC-031" => {
+            let source_location = result
+                .decode
+                .as_ref()?
+                .issues
+                .iter()
+                .filter(|issue| {
+                    !matches!(
+                        issue.kind.as_str(),
+                        "black_segment" | "freeze_segment" | "visual_corruption_candidate"
+                    )
+                })
+                .flat_map(|issue| issue.locations.iter())
+                .find(|location| {
+                    next_random_access_frame(result, location.frame_number).is_some()
+                })?;
+            let source_frame = frame_evidence(result, source_location.frame_number)?;
+            let recovery = next_random_access_frame(result, source_location.frame_number)?;
+            let frame_gap = recovery
+                .frame_number
+                .saturating_sub(source_location.frame_number);
+            let time_gap = source_frame
+                .first_offset_ms
+                .zip(recovery.first_offset_ms)
+                .map(|(start, end)| end.saturating_sub(start));
+            if frame_gap <= 100 && time_gap.is_none_or(|value| value <= 3_000) {
+                None
+            } else {
+                Some((
+                    75,
+                    "解码异常候选之后，下一处 IDR/CRA 随机接入机会等待较长；这不等同于已确认画面恢复。".into(),
+                    vec![
+                        DiagnosticEvidence {
+                            label: "异常候选帧".into(),
+                            value: format!("#{}", source_location.frame_number),
+                        },
+                        DiagnosticEvidence {
+                            label: "下一随机接入帧".into(),
+                            value: format!("#{}", recovery.frame_number),
+                        },
+                        DiagnosticEvidence {
+                            label: "等待范围".into(),
+                            value: format!(
+                                "{} 帧{}",
+                                frame_gap,
+                                time_gap
+                                    .map(|value| format!("，约 {value} ms"))
+                                    .unwrap_or_default()
+                            ),
+                        },
+                    ],
+                ))
+            }
+        }
         "VIS-033" if decode_has(result, &["black_segment"]) => Some((
             65,
             "画面检测器发现疑似黑屏区间；暗场也可能触发，不能单独认定故障。".into(),
@@ -1207,10 +1603,31 @@ fn evidence_for(
                 || h265_starts("h265_fu_")
                 || h265_has("h265_ap_length") =>
         {
+            let analysis = h265?;
+            let mut evidence = one("不完整 NALU", analysis.incomplete_nalus.to_string());
+            if let Some(nalu) = analysis.nalus.iter().find(|nalu| !nalu.complete) {
+                evidence.push(DiagnosticEvidence {
+                    label: "首个不完整 NALU".into(),
+                    value: format!(
+                        "#{} {}，AU {}，RTP Seq {}→{}",
+                        nalu.nalu_number,
+                        nalu.type_name,
+                        nalu.access_unit_number
+                            .map(|value| value.to_string())
+                            .unwrap_or_else(|| "未知".into()),
+                        nalu.first_sequence
+                            .map(|value| value.to_string())
+                            .unwrap_or_else(|| "未知".into()),
+                        nalu.last_sequence
+                            .map(|value| value.to_string())
+                            .unwrap_or_else(|| "未知".into())
+                    ),
+                });
+            }
             Some((
                 95,
                 "存在未完整重组的 H.265 NALU 或 RTP 封包结构异常。".into(),
-                one("不完整 NALU", h265?.incomplete_nalus.to_string()),
+                evidence,
             ))
         }
         "H265-038" if h265.is_some_and(|analysis| analysis.first_frame_is_irap == Some(false)) => {
@@ -1236,6 +1653,275 @@ fn evidence_for(
             "同一 H.265 SPS ID 在采样中声明了不同分辨率。".into(),
             one("H.265 异常", "h265_resolution_changed".into()),
         )),
+        "H264-049"
+            if h264.is_some_and(|analysis| {
+                analysis.parameter_changes.iter().any(|change| {
+                    change
+                        .changed_fields
+                        .iter()
+                        .any(|field| field != "resolution")
+                })
+            }) =>
+        {
+            let changes = h264?
+                .parameter_changes
+                .iter()
+                .filter(|change| {
+                    change
+                        .changed_fields
+                        .iter()
+                        .any(|field| field != "resolution")
+                })
+                .take(8)
+                .map(|change| DiagnosticEvidence {
+                    label: format!(
+                        "{} #{}",
+                        change.parameter_kind.to_uppercase(),
+                        change.parameter_id
+                    ),
+                    value: format!(
+                        "NALU #{}，从 AU #{} 生效：{}",
+                        change.nalu_number,
+                        change
+                            .effective_access_unit
+                            .map(|value| value.to_string())
+                            .unwrap_or_else(|| "未知".into()),
+                        change.changed_fields.join("、")
+                    ),
+                })
+                .collect();
+            Some((85, "检测到同一参数集 ID 的实际字段变化。".into(), changes))
+        }
+        "H265-050"
+            if h265.is_some_and(|analysis| {
+                analysis.parameter_changes.iter().any(|change| {
+                    change
+                        .changed_fields
+                        .iter()
+                        .any(|field| field != "resolution")
+                })
+            }) =>
+        {
+            let changes = h265?
+                .parameter_changes
+                .iter()
+                .filter(|change| {
+                    change
+                        .changed_fields
+                        .iter()
+                        .any(|field| field != "resolution")
+                })
+                .take(8)
+                .map(|change| DiagnosticEvidence {
+                    label: format!(
+                        "{} #{}",
+                        change.parameter_kind.to_uppercase(),
+                        change.parameter_id
+                    ),
+                    value: format!(
+                        "NALU #{}，从 AU #{} 生效：{}",
+                        change.nalu_number,
+                        change
+                            .effective_access_unit
+                            .map(|value| value.to_string())
+                            .unwrap_or_else(|| "未知".into()),
+                        change.changed_fields.join("、")
+                    ),
+                })
+                .collect();
+            Some((85, "检测到同一参数集 ID 的实际字段变化。".into(), changes))
+        }
+        "H264-051" => {
+            let (sps, maximum) = h264?.sps.iter().find_map(|sps| {
+                h264_level_max_reference_frames(sps).map(|maximum| (sps, maximum))
+            })?;
+            Some((
+                95,
+                "SPS 声明的参考帧数或 VUI 解码缓冲帧数超过该 Level 在当前分辨率下可容纳的最大帧数。".into(),
+                vec![
+                    DiagnosticEvidence {
+                        label: "SPS / Level".into(),
+                        value: format!("SPS #{} / level_idc {}", sps.id, sps.level_idc),
+                    },
+                    DiagnosticEvidence {
+                        label: "分辨率".into(),
+                        value: format!("{}×{}", sps.width, sps.height),
+                    },
+                    DiagnosticEvidence {
+                        label: "参考帧 / VUI 缓冲 / Level DPB 上限".into(),
+                        value: format!(
+                            "{} / {} / {} 帧",
+                            sps.max_num_ref_frames,
+                            sps.max_dec_frame_buffering
+                                .map(|value| value.to_string())
+                                .unwrap_or_else(|| "未声明".into()),
+                            maximum
+                        ),
+                    },
+                ],
+            ))
+        }
+        "H265-052" => {
+            let (sps, declared, maximum) = h265?.sps.iter().find_map(|sps| {
+                h265_level_max_dpb_frames(sps)
+                    .zip(sps.max_dec_pic_buffering)
+                    .map(|(maximum, declared)| (sps, declared, maximum))
+            })?;
+            Some((
+                95,
+                "SPS 声明的解码图像缓冲帧数超过该 Level 在当前分辨率下的上限。".into(),
+                vec![
+                    DiagnosticEvidence {
+                        label: "SPS / Level".into(),
+                        value: format!("SPS #{} / level_idc {}", sps.id, sps.level_idc),
+                    },
+                    DiagnosticEvidence {
+                        label: "分辨率".into(),
+                        value: format!("{}×{}", sps.width, sps.height),
+                    },
+                    DiagnosticEvidence {
+                        label: "解码图像缓冲声明 / DPB 上限".into(),
+                        value: format!("{} / {} 帧", declared, maximum),
+                    },
+                ],
+            ))
+        }
+        "H264-053" => {
+            let sps = h264?.sps.iter().find(|sps| {
+                sps.max_dec_frame_buffering.is_some_and(|buffering| {
+                    buffering < sps.max_num_ref_frames
+                        || sps
+                            .max_num_reorder_frames
+                            .is_some_and(|reorder| reorder > buffering)
+                })
+            })?;
+            let buffering = sps.max_dec_frame_buffering?;
+            Some((
+                100,
+                "SPS VUI 的 bitstream restriction 字段存在可确定的内部矛盾。".into(),
+                vec![DiagnosticEvidence {
+                    label: format!("SPS #{} 缓冲约束", sps.id),
+                    value: format!(
+                        "max_num_ref_frames={}，max_num_reorder_frames={}，max_dec_frame_buffering={}",
+                        sps.max_num_ref_frames,
+                        sps.max_num_reorder_frames
+                            .map(|value| value.to_string())
+                            .unwrap_or_else(|| "未声明".into()),
+                        buffering
+                    ),
+                }],
+            ))
+        }
+        "H264-054" => {
+            let protocol = protocol?;
+            let duration_ms = protocol.sample_duration_ms?;
+            if duration_ms < 1_000 || result.data_quality.capture_truncated {
+                return None;
+            }
+            let observed = protocol.rtp.average_bit_rate_bps?;
+            let (sps, declared) = h264?.sps.iter().find_map(|sps| {
+                let declared = [sps.nal_hrd.as_ref(), sps.vcl_hrd.as_ref()]
+                    .into_iter()
+                    .flatten()
+                    .map(|hrd| hrd.maximum_bit_rate_bps)
+                    .max()?;
+                (observed > declared.saturating_mul(105) / 100).then_some((sps, declared))
+            })?;
+            Some((
+                95,
+                "完整样本中的 RTP 视频载荷平均码率超过 SPS HRD 声明的最大码率。".into(),
+                vec![
+                    DiagnosticEvidence {
+                        label: "实测平均载荷码率".into(),
+                        value: format!("{} bps（样本 {} ms）", observed, duration_ms),
+                    },
+                    DiagnosticEvidence {
+                        label: format!("SPS #{} HRD 最大码率", sps.id),
+                        value: format!("{} bps", declared),
+                    },
+                    DiagnosticEvidence {
+                        label: "判定边界".into(),
+                        value: "该规则证明平均码率越界；瞬时 CPB 溢出仍需 SEI 时序仿真。".into(),
+                    },
+                ],
+            ))
+        }
+        "H264-055" => {
+            let simulation = &h264?.hrd_simulation;
+            if simulation.status != "simulated_cbr_single_cpb"
+                || (simulation.overflow_aus.is_empty() && simulation.underflow_aus.is_empty())
+            {
+                return None;
+            }
+            let overflow = simulation
+                .overflow_aus
+                .iter()
+                .map(u64::to_string)
+                .collect::<Vec<_>>()
+                .join("、");
+            let underflow = simulation
+                .underflow_aus
+                .iter()
+                .map(u64::to_string)
+                .collect::<Vec<_>>()
+                .join("、");
+            let first = simulation
+                .points
+                .iter()
+                .find(|point| point.overflow || point.underflow);
+            let mut evidence = vec![
+                DiagnosticEvidence {
+                    label: "仿真范围".into(),
+                    value: format!(
+                        "{} schedule，SPS #{}，{} 个 AU",
+                        simulation.schedule.to_uppercase(),
+                        simulation
+                            .sps_id
+                            .map(|value| value.to_string())
+                            .unwrap_or_else(|| "—".into()),
+                        simulation.simulated_aus
+                    ),
+                },
+                DiagnosticEvidence {
+                    label: "CPB 溢出 AU".into(),
+                    value: if overflow.is_empty() {
+                        "无".into()
+                    } else {
+                        overflow
+                    },
+                },
+                DiagnosticEvidence {
+                    label: "CPB 下溢 AU".into(),
+                    value: if underflow.is_empty() {
+                        "无".into()
+                    } else {
+                        underflow
+                    },
+                },
+            ];
+            if let Some(point) = first {
+                evidence.push(DiagnosticEvidence {
+                    label: format!("首个越界 AU #{}", point.access_unit),
+                    value: format!(
+                        "AU={} bits，移除前/后 fullness={}/{} bits，cpb_removal_delay={}",
+                        point.access_unit_bits,
+                        point.fullness_before_removal_bits,
+                        point.fullness_after_removal_bits,
+                        point.cpb_removal_delay
+                    ),
+                });
+            }
+            evidence.push(DiagnosticEvidence {
+                label: "判定边界".into(),
+                value: "基于保留 NALU 字节、SPS HRD 和 SEI 时序；不包含 RTP、容器及网络传输开销。"
+                    .into(),
+            });
+            Some((
+                98,
+                "单 CPB、CBR 的逐访问单元 HRD 仿真已观察到 CPB fullness 越界。".into(),
+                evidence,
+            ))
+        }
         "VIS-041" if decode_has(result, &["visual_corruption_candidate"]) => Some((
             78,
             "画面级抽样发现疑似局部花屏或彩色破碎；这是启发式候选，需用内嵌回放确认。".into(),
@@ -1620,10 +2306,10 @@ mod tests {
     }
 
     #[test]
-    fn catalog_has_48_unique_rules() {
-        assert_eq!(rule_catalog().len(), 48);
+    fn catalog_has_55_unique_rules() {
+        assert_eq!(rule_catalog().len(), 55);
         let ids: HashSet<_> = rule_catalog().iter().map(|rule| rule.id).collect();
-        assert_eq!(ids.len(), 48);
+        assert_eq!(ids.len(), 55);
     }
 
     #[test]
@@ -1887,6 +2573,405 @@ mod tests {
             build_timeline(&result)
                 .iter()
                 .any(|event| event.source == "H265" && event.sequence == Some(12))
+        );
+    }
+
+    #[test]
+    fn parameter_change_keeps_exact_nalu_au_and_packet_evidence() {
+        let mut result = result_with_protocol(ProtocolAnalysis::default());
+        result.h264 = Some(streamscope_core::H264Analysis {
+            nalus: vec![streamscope_core::VideoNaluEvidence {
+                nalu_number: 8,
+                access_unit_number: Some(4),
+                rtp_timestamp: Some(180_000),
+                first_sequence: Some(300),
+                last_sequence: Some(300),
+                packets: vec![streamscope_core::VideoPacketAssociation {
+                    packet_number: 77,
+                    rtp_sequence: 300,
+                    offset_ms: 2_000,
+                }],
+                ..streamscope_core::VideoNaluEvidence::default()
+            }],
+            parameter_changes: vec![streamscope_core::VideoParameterChange {
+                nalu_number: 8,
+                effective_access_unit: Some(4),
+                parameter_kind: "sps".into(),
+                parameter_id: 0,
+                changed_fields: vec!["bit_depth".into()],
+            }],
+            ..streamscope_core::H264Analysis::default()
+        });
+
+        let finding = evaluate(&result)
+            .into_iter()
+            .find(|finding| finding.rule_id == "H264-049")
+            .unwrap();
+        assert!(finding.evidence[0].value.contains("NALU #8"));
+        let event = build_timeline(&result)
+            .into_iter()
+            .find(|event| event.event_type == "parameter_set_changed")
+            .unwrap();
+        assert_eq!(event.offset_ms, Some(2_000));
+        assert_eq!(event.frame_number, Some(4));
+        assert_eq!(event.first_packet, Some(77));
+        assert_eq!(
+            event.location_precision.as_deref(),
+            Some("exact_capture_packet_and_access_unit")
+        );
+    }
+
+    #[test]
+    fn reports_only_definite_h264_level_dpb_overflow() {
+        let mut result = result_with_protocol(ProtocolAnalysis::default());
+        result.h264 = Some(streamscope_core::H264Analysis {
+            sps: vec![streamscope_core::H264SpsInfo {
+                id: 0,
+                profile_idc: 100,
+                level_idc: 31,
+                constraint_set3_flag: false,
+                chroma_format_idc: 1,
+                bit_depth_luma: 8,
+                bit_depth_chroma: 8,
+                max_frame_num: 16,
+                pic_order_cnt_type: 0,
+                max_num_ref_frames: 4,
+                width: 1_920,
+                height: 1_080,
+                progressive: true,
+                fps_milli: Some(25_000),
+                num_units_in_tick: Some(1),
+                time_scale: Some(50),
+                nal_hrd: None,
+                vcl_hrd: None,
+                max_num_reorder_frames: None,
+                max_dec_frame_buffering: None,
+            }],
+            ..streamscope_core::H264Analysis::default()
+        });
+        let finding = evaluate(&result)
+            .into_iter()
+            .find(|finding| finding.rule_id == "H264-051")
+            .unwrap();
+        assert!(
+            finding
+                .evidence
+                .iter()
+                .any(|item| item.value == "4 / 未声明 / 2 帧")
+        );
+
+        result.h264.as_mut().unwrap().sps[0].max_num_ref_frames = 2;
+        assert!(
+            evaluate(&result)
+                .iter()
+                .all(|finding| finding.rule_id != "H264-051")
+        );
+        result.h264.as_mut().unwrap().sps[0].level_idc = 0;
+        result.h264.as_mut().unwrap().sps[0].max_num_ref_frames = 16;
+        assert!(
+            evaluate(&result)
+                .iter()
+                .all(|finding| finding.rule_id != "H264-051")
+        );
+
+        let sps = &mut result.h264.as_mut().unwrap().sps[0];
+        sps.level_idc = 11;
+        sps.width = 176;
+        sps.height = 144;
+        sps.max_num_ref_frames = 5;
+        sps.constraint_set3_flag = false;
+        assert!(
+            evaluate(&result)
+                .iter()
+                .all(|finding| finding.rule_id != "H264-051")
+        );
+        result.h264.as_mut().unwrap().sps[0].constraint_set3_flag = true;
+        let finding = evaluate(&result)
+            .into_iter()
+            .find(|finding| finding.rule_id == "H264-051")
+            .unwrap();
+        assert!(
+            finding
+                .evidence
+                .iter()
+                .any(|item| item.value == "5 / 未声明 / 4 帧")
+        );
+    }
+
+    #[test]
+    fn reports_h264_vui_buffering_inconsistency() {
+        let mut result = result_with_protocol(ProtocolAnalysis::default());
+        result.h264 = Some(streamscope_core::H264Analysis {
+            sps: vec![streamscope_core::H264SpsInfo {
+                id: 2,
+                profile_idc: 100,
+                level_idc: 40,
+                constraint_set3_flag: false,
+                chroma_format_idc: 1,
+                bit_depth_luma: 8,
+                bit_depth_chroma: 8,
+                max_frame_num: 16,
+                pic_order_cnt_type: 0,
+                max_num_ref_frames: 4,
+                width: 1_920,
+                height: 1_080,
+                progressive: true,
+                fps_milli: Some(25_000),
+                num_units_in_tick: Some(1),
+                time_scale: Some(50),
+                nal_hrd: None,
+                vcl_hrd: None,
+                max_num_reorder_frames: Some(3),
+                max_dec_frame_buffering: Some(2),
+            }],
+            ..streamscope_core::H264Analysis::default()
+        });
+
+        let finding = evaluate(&result)
+            .into_iter()
+            .find(|finding| finding.rule_id == "H264-053")
+            .unwrap();
+        assert_eq!(finding.confidence_percent, 100);
+        assert!(
+            finding.evidence[0]
+                .value
+                .contains("max_dec_frame_buffering=2")
+        );
+
+        let sps = &mut result.h264.as_mut().unwrap().sps[0];
+        sps.max_dec_frame_buffering = Some(4);
+        sps.max_num_reorder_frames = Some(4);
+        assert!(
+            evaluate(&result)
+                .iter()
+                .all(|finding| finding.rule_id != "H264-053")
+        );
+    }
+
+    #[test]
+    fn reports_hrd_rate_overflow_only_for_long_complete_samples() {
+        let protocol = ProtocolAnalysis {
+            sample_duration_ms: Some(2_000),
+            rtp: RtpStatistics {
+                average_bit_rate_bps: Some(2_000_000),
+                ..RtpStatistics::default()
+            },
+            ..ProtocolAnalysis::default()
+        };
+        let mut result = result_with_protocol(protocol);
+        result.h264 = Some(streamscope_core::H264Analysis {
+            sps: vec![streamscope_core::H264SpsInfo {
+                id: 0,
+                profile_idc: 100,
+                level_idc: 40,
+                constraint_set3_flag: false,
+                chroma_format_idc: 1,
+                bit_depth_luma: 8,
+                bit_depth_chroma: 8,
+                max_frame_num: 16,
+                pic_order_cnt_type: 0,
+                max_num_ref_frames: 4,
+                width: 1_920,
+                height: 1_080,
+                progressive: true,
+                fps_milli: Some(25_000),
+                num_units_in_tick: Some(1),
+                time_scale: Some(50),
+                nal_hrd: Some(streamscope_core::H264HrdInfo {
+                    cpb_count: 1,
+                    maximum_bit_rate_bps: 1_500_000,
+                    maximum_cpb_size_bits: 3_000_000,
+                    all_cbr: true,
+                    entries: vec![streamscope_core::H264CpbEntry {
+                        bit_rate_bps: 1_500_000,
+                        cpb_size_bits: 3_000_000,
+                        cbr: true,
+                    }],
+                    initial_cpb_removal_delay_length: 24,
+                    cpb_removal_delay_length: 24,
+                    dpb_output_delay_length: 24,
+                    time_offset_length: 24,
+                }),
+                vcl_hrd: None,
+                max_num_reorder_frames: Some(2),
+                max_dec_frame_buffering: Some(4),
+            }],
+            ..streamscope_core::H264Analysis::default()
+        });
+
+        assert!(
+            evaluate(&result)
+                .iter()
+                .any(|finding| finding.rule_id == "H264-054")
+        );
+        result.protocol.as_mut().unwrap().sample_duration_ms = Some(999);
+        assert!(
+            evaluate(&result)
+                .iter()
+                .all(|finding| finding.rule_id != "H264-054")
+        );
+        result.protocol.as_mut().unwrap().sample_duration_ms = Some(2_000);
+        result.data_quality.capture_truncated = true;
+        assert!(
+            evaluate(&result)
+                .iter()
+                .all(|finding| finding.rule_id != "H264-054")
+        );
+    }
+
+    #[test]
+    fn reports_only_evidence_backed_per_au_hrd_violations() {
+        let mut result = result_with_protocol(ProtocolAnalysis::default());
+        result.h264 = Some(streamscope_core::H264Analysis {
+            frames: vec![streamscope_core::H264FrameEvidence {
+                frame_number: 4,
+                rtp_timestamp: Some(180_000),
+                first_sequence: Some(20),
+                last_sequence: Some(22),
+                first_nalu: 8,
+                last_nalu: 10,
+                first_packet: Some(100),
+                last_packet: Some(102),
+                first_offset_ms: Some(2_000),
+                last_offset_ms: Some(2_040),
+                sample_start_offset: Some(1_000),
+                sample_end_offset: Some(6_000),
+                idr: false,
+                complete: true,
+                boundary_confidence: "test".into(),
+            }],
+            hrd_simulation: streamscope_core::H264HrdSimulation {
+                status: "simulated_cbr_single_cpb".into(),
+                schedule: "nal".into(),
+                sps_id: Some(0),
+                simulated_aus: 4,
+                overflow_aus: vec![4],
+                points: vec![streamscope_core::H264HrdAuPoint {
+                    access_unit: 4,
+                    sei_nalu: 9,
+                    access_unit_bits: 40_000,
+                    cpb_removal_delay: 4,
+                    fullness_before_removal_bits: 60_000,
+                    fullness_after_removal_bits: 20_000,
+                    overflow: true,
+                    ..streamscope_core::H264HrdAuPoint::default()
+                }],
+                ..streamscope_core::H264HrdSimulation::default()
+            },
+            ..streamscope_core::H264Analysis::default()
+        });
+
+        let finding = evaluate(&result)
+            .into_iter()
+            .find(|finding| finding.rule_id == "H264-055")
+            .unwrap();
+        assert_eq!(finding.confidence_percent, 98);
+        assert!(finding.evidence.iter().any(|item| item.value == "4"));
+        let event = build_timeline(&result)
+            .into_iter()
+            .find(|event| event.event_type == "cpb_overflow")
+            .unwrap();
+        assert_eq!(event.offset_ms, Some(2_000));
+        assert_eq!(event.first_packet, Some(100));
+
+        let simulation = &mut result.h264.as_mut().unwrap().hrd_simulation;
+        simulation.status = "evidence_insufficient".into();
+        assert!(
+            evaluate(&result)
+                .iter()
+                .all(|finding| finding.rule_id != "H264-055")
+        );
+    }
+
+    #[test]
+    fn reports_only_definite_h265_level_dpb_overflow() {
+        let mut result = result_with_protocol(ProtocolAnalysis::default());
+        result.h265 = Some(streamscope_core::H265Analysis {
+            sps: vec![streamscope_core::H265SpsInfo {
+                id: 0,
+                vps_id: 0,
+                max_sub_layers: 1,
+                profile_idc: 1,
+                level_idc: 120,
+                chroma_format_idc: 1,
+                bit_depth_luma: 8,
+                bit_depth_chroma: 8,
+                width: 1_920,
+                height: 1_080,
+                max_dec_pic_buffering: Some(8),
+                max_num_reorder_pics: Some(2),
+            }],
+            ..streamscope_core::H265Analysis::default()
+        });
+        let finding = evaluate(&result)
+            .into_iter()
+            .find(|finding| finding.rule_id == "H265-052")
+            .unwrap();
+        assert!(finding.evidence.iter().any(|item| item.value == "8 / 6 帧"));
+
+        result.h265.as_mut().unwrap().sps[0].max_dec_pic_buffering = Some(6);
+        assert!(
+            evaluate(&result)
+                .iter()
+                .all(|finding| finding.rule_id != "H265-052")
+        );
+        result.h265.as_mut().unwrap().sps[0].level_idc = 0;
+        result.h265.as_mut().unwrap().sps[0].max_dec_pic_buffering = Some(16);
+        assert!(
+            evaluate(&result)
+                .iter()
+                .all(|finding| finding.rule_id != "H265-052")
+        );
+    }
+
+    #[test]
+    fn long_random_access_wait_is_reported_as_opportunity_not_confirmed_recovery() {
+        let frame = |frame_number, offset_ms, idr| streamscope_core::H264FrameEvidence {
+            frame_number,
+            rtp_timestamp: None,
+            first_sequence: None,
+            last_sequence: None,
+            first_nalu: frame_number,
+            last_nalu: frame_number,
+            first_packet: None,
+            last_packet: None,
+            first_offset_ms: Some(offset_ms),
+            last_offset_ms: Some(offset_ms),
+            sample_start_offset: None,
+            sample_end_offset: None,
+            idr,
+            complete: true,
+            boundary_confidence: "test".into(),
+        };
+        let mut result = result_with_protocol(ProtocolAnalysis::default());
+        result.h264 = Some(streamscope_core::H264Analysis {
+            frames: vec![frame(10, 1_000, false), frame(140, 6_200, true)],
+            ..streamscope_core::H264Analysis::default()
+        });
+        result.decode = Some(streamscope_core::DecodeSummary {
+            issues: vec![streamscope_core::DecodeIssue {
+                kind: "missing_reference".into(),
+                count: 1,
+                example: "reference missing".into(),
+                locations: vec![streamscope_core::DecodeIssueLocation {
+                    frame_number: 10,
+                    pts_time: None,
+                    precision: "candidate_nearest_log_frame".into(),
+                }],
+            }],
+            ..streamscope_core::DecodeSummary::default()
+        });
+
+        let finding = evaluate(&result)
+            .into_iter()
+            .find(|finding| finding.rule_id == "REC-031")
+            .unwrap();
+        assert!(finding.conclusion.contains("不等同于已确认画面恢复"));
+        assert!(
+            finding
+                .evidence
+                .iter()
+                .any(|item| item.value.contains("5200 ms"))
         );
     }
 }

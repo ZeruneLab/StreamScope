@@ -3,7 +3,10 @@ mod bit;
 mod packetization;
 mod parameter;
 
-pub use analyze::{Nalu, analyze_annex_b, analyze_nalus, split_annex_b};
+pub use analyze::{
+    Nalu, analyze_annex_b, analyze_nalu_results, analyze_nalus, inspect_annex_b_range,
+    split_annex_b,
+};
 pub use bit::{BitError, BitReader, ebsp_to_rbsp};
 pub use packetization::{Depacketizer, RtpPayload};
 pub use parameter::{SliceHeader, parse_pps, parse_slice_header, parse_sps};

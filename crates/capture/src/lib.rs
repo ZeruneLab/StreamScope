@@ -18,7 +18,7 @@ use streamscope_audio::{
 use streamscope_core::{
     AudioAnalysis, CapturePacketEvent, CaptureStreamIdentity, CaptureSummary, H264Analysis,
     H264FrameEvidence, H265Analysis, ProtocolAnalysis, RtcpSenderReportEvidence,
-    RtcpSourceDescription, Transport,
+    RtcpSourceDescription, Transport, VideoNaluEvidence, VideoPacketAssociation,
 };
 use streamscope_h264::{Depacketizer, RtpPayload, analyze_nalus};
 use streamscope_h265::{
@@ -40,12 +40,16 @@ pub enum CaptureError {
     Io(#[from] std::io::Error),
     #[error("不支持或损坏的 PCAP/PCAPNG 文件: {0}")]
     Invalid(&'static str),
+    #[error("分析任务已由用户取消")]
+    Cancelled,
 }
 
 #[derive(Debug)]
 pub struct CaptureAnalysis {
     pub summary: CaptureSummary,
     pub streams: Vec<CapturedStream>,
+    pub protocol: Option<ProtocolAnalysis>,
+    pub session_sdp: Option<String>,
 }
 #[derive(Debug)]
 pub struct CapturedStream {
@@ -83,6 +87,7 @@ struct Connection {
     observed_payload: bool,
     directions: [tcp::Reassembly; 2],
     decoders: [tcp::Decoder; 2],
+    loose_rtsp_decoders: [tcp::Decoder; 2],
     session: Session,
 }
 impl Connection {
@@ -94,6 +99,7 @@ impl Connection {
             observed_payload: false,
             directions: Default::default(),
             decoders: Default::default(),
+            loose_rtsp_decoders: Default::default(),
             session: Session::default(),
         }
     }
@@ -218,6 +224,7 @@ struct Capture<'a> {
     states: Vec<StreamState>,
     routes: HashMap<FlowKey, usize>,
     connections: HashMap<ConnectionKey, Connection>,
+    completed_sessions: Vec<(ProtocolAnalysis, Option<String>)>,
     udp_bindings: Vec<(String, UdpBinding)>,
     next_connection: u64,
     first_micros: Option<u64>,
@@ -245,6 +252,7 @@ pub fn analyze_capture_file_with_progress(
         states: Vec::new(),
         routes: HashMap::new(),
         connections: HashMap::new(),
+        completed_sessions: Vec::new(),
         udp_bindings: Vec::new(),
         next_connection: 0,
         first_micros: None,
@@ -256,6 +264,9 @@ pub fn analyze_capture_file_with_progress(
     std::fs::create_dir_all(output_dir.join("streams"))?;
     progress(0, "流式读取抓包，按端点、连接、通道和 SSRC 发现媒体流");
     reader::read_capture(BufReader::new(File::open(path)?), |frame| {
+        if streamscope_core::analysis_cancellation_requested() {
+            return Err(CaptureError::Cancelled);
+        }
         capture.frame(frame)?;
         if capture.summary.total_frames.is_multiple_of(10_000) {
             progress(
@@ -270,15 +281,42 @@ pub fn analyze_capture_file_with_progress(
         Ok(())
     })?;
     let connections = std::mem::take(&mut capture.connections);
+    let mut session_protocols = Vec::new();
+    let mut session_sdps = Vec::new();
+    for (protocol, sdp) in std::mem::take(&mut capture.completed_sessions) {
+        session_protocols.push(protocol);
+        if let Some(sdp) = sdp {
+            session_sdps.push(sdp);
+        }
+    }
     for (key, mut connection) in connections {
         capture.finish_connection(&key, &mut connection)?;
+        connection.session.finish_pending_transactions();
+        if let Some(sdp) = connection.session.sdp.clone() {
+            session_sdps.push(sdp);
+        }
+        if connection.session.protocol.connected
+            || !connection.session.protocol.transactions.is_empty()
+            || !connection.session.protocol.media.is_empty()
+        {
+            session_protocols.push(connection.session.protocol.clone());
+        }
     }
     std::mem::take(&mut capture.spools).finish()?;
     let base = capture.first_micros.unwrap_or(0);
     capture.summary.duration_ms = capture.last_micros.saturating_sub(base) / 1_000;
+    add_rtsp_capture_warnings(
+        &mut capture.summary.warnings,
+        &capture.udp_bindings,
+        &capture.states,
+        &session_protocols,
+    );
     let count = capture.states.len();
     let mut streams = Vec::with_capacity(count);
     for (index, mut state) in capture.states.into_iter().enumerate() {
+        if streamscope_core::analysis_cancellation_requested() {
+            return Err(CaptureError::Cancelled);
+        }
         progress(
             50 + ((index * 50) / count.max(1)) as u8,
             &format!(
@@ -299,14 +337,219 @@ pub fn analyze_capture_file_with_progress(
         for event in &mut state.identity.events {
             event.offset_ms = event.offset_ms.saturating_sub(base) / 1_000;
         }
-        streams.push(finish_stream(state, base)?);
+        let mut stream = finish_stream(state, base)?;
+        if let Some(session) = matching_session_protocol(&stream.protocol, &session_protocols) {
+            apply_session_protocol(&mut stream.protocol, session);
+        }
+        streams.push(stream);
     }
     capture.summary.stream_count = streams.len();
     progress(100, &format!("已完成 {} 组媒体流的独立统计", streams.len()));
     Ok(CaptureAnalysis {
         summary: capture.summary,
         streams,
+        protocol: merge_session_protocols(&session_protocols),
+        session_sdp: (!session_sdps.is_empty()).then(|| session_sdps.join("\n\n")),
     })
+}
+
+fn matching_session_protocol<'a>(
+    stream: &ProtocolAnalysis,
+    sessions: &'a [ProtocolAnalysis],
+) -> Option<&'a ProtocolAnalysis> {
+    stream
+        .session_id
+        .as_ref()
+        .and_then(|id| {
+            sessions
+                .iter()
+                .find(|session| session.session_id.as_ref() == Some(id))
+        })
+        .or_else(|| (sessions.len() == 1).then(|| &sessions[0]))
+}
+
+fn apply_session_protocol(target: &mut ProtocolAnalysis, session: &ProtocolAnalysis) {
+    target.connected = session.connected;
+    target.authenticated = session.authenticated;
+    target.server = session.server.clone();
+    target.public_methods = session.public_methods.clone();
+    target.session_id = target
+        .session_id
+        .clone()
+        .or_else(|| session.session_id.clone());
+    target.content_base = session.content_base.clone();
+    target.transactions = session.transactions.clone();
+    target.media = session.media.clone();
+    if target.negotiated_transport.is_none() {
+        target.negotiated_transport = session.negotiated_transport.clone();
+    }
+    target.errors.extend(session.errors.clone());
+}
+
+fn merge_session_protocols(sessions: &[ProtocolAnalysis]) -> Option<ProtocolAnalysis> {
+    if sessions.is_empty() {
+        return None;
+    }
+    let mut merged = ProtocolAnalysis::default();
+    let mut session_ids = Vec::new();
+    for session in sessions {
+        merged.connected |= session.connected;
+        merged.authenticated |= session.authenticated;
+        if merged.server.is_none() {
+            merged.server = session.server.clone();
+        }
+        if merged.content_base.is_none() {
+            merged.content_base = session.content_base.clone();
+        }
+        if merged.negotiated_transport.is_none() {
+            merged.negotiated_transport = session.negotiated_transport.clone();
+        }
+        for method in &session.public_methods {
+            if !merged.public_methods.contains(method) {
+                merged.public_methods.push(method.clone());
+            }
+        }
+        for transaction in &session.transactions {
+            if !merged.transactions.contains(transaction) {
+                merged.transactions.push(transaction.clone());
+            }
+        }
+        for media in &session.media {
+            if !merged.media.contains(media) {
+                merged.media.push(media.clone());
+            }
+        }
+        for error in &session.errors {
+            if !merged.errors.contains(error) {
+                merged.errors.push(error.clone());
+            }
+        }
+        if let Some(id) = &session.session_id
+            && !session_ids.contains(id)
+        {
+            session_ids.push(id.clone());
+        }
+    }
+    merged
+        .transactions
+        .sort_by_key(|transaction| transaction.cseq);
+    if session_ids.len() == 1 {
+        merged.session_id = session_ids.pop();
+    } else if session_ids.len() > 1 {
+        merged.errors.push(format!(
+            "抓包包含 {} 个 RTSP Session；事务已汇总，逐流结果按 Session 分别关联",
+            session_ids.len()
+        ));
+    }
+    Some(merged)
+}
+
+fn add_rtsp_capture_warnings(
+    warnings: &mut Vec<String>,
+    bindings: &[(String, UdpBinding)],
+    states: &[StreamState],
+    sessions: &[ProtocolAnalysis],
+) {
+    for session in sessions {
+        let play = session
+            .transactions
+            .iter()
+            .filter(|transaction| transaction.method.eq_ignore_ascii_case("PLAY"))
+            .collect::<Vec<_>>();
+        let failed = play
+            .iter()
+            .any(|transaction| transaction.status_code >= 400);
+        let succeeded = play
+            .iter()
+            .any(|transaction| (200..300).contains(&transaction.status_code));
+        let missing = play.iter().any(|transaction| transaction.status_code == 0);
+        if failed || missing {
+            let statuses = play
+                .iter()
+                .map(|transaction| {
+                    format!(
+                        "CSeq {}={} {}",
+                        transaction
+                            .cseq
+                            .map(|value| value.to_string())
+                            .unwrap_or_else(|| "?".into()),
+                        transaction.status_code,
+                        transaction.reason
+                    )
+                })
+                .collect::<Vec<_>>()
+                .join("；");
+            let conclusion = if failed && succeeded {
+                "RTSP PLAY 响应状态不一致"
+            } else if failed {
+                "RTSP PLAY 失败"
+            } else {
+                "RTSP PLAY 响应缺失"
+            };
+            add_warning(warnings, &format!("{conclusion}：{statuses}"));
+        }
+    }
+
+    for (_, binding) in bindings {
+        let received = states.iter().any(|state| {
+            state.key.tcp_connection.is_none()
+                && state.key.source.ip == binding.source.ip
+                && (!binding.source_port_known || state.key.source.port == binding.source.port)
+                && state.key.destination == binding.destination
+        });
+        if received {
+            continue;
+        }
+        let mut codecs = binding.codecs.values();
+        let Some(first) = codecs.next() else {
+            continue;
+        };
+        let payload_types = binding
+            .codecs
+            .keys()
+            .map(|value| value.to_string())
+            .collect::<Vec<_>>()
+            .join(",");
+        let play_evidence = sessions
+            .iter()
+            .flat_map(|session| session.transactions.iter())
+            .filter(|transaction| {
+                transaction.method.eq_ignore_ascii_case("PLAY")
+                    && (binding.control.is_empty()
+                        || transaction.uri == binding.control
+                        || transaction.uri.ends_with(&binding.control))
+            })
+            .map(|transaction| {
+                format!(
+                    "CSeq {}={} {}",
+                    transaction
+                        .cseq
+                        .map(|value| value.to_string())
+                        .unwrap_or_else(|| "?".into()),
+                    transaction.status_code,
+                    transaction.reason
+                )
+            })
+            .collect::<Vec<_>>()
+            .join("；");
+        let play_evidence = if play_evidence.is_empty() {
+            "该轨道未找到可配对的 PLAY 响应".to_string()
+        } else {
+            format!("该轨道 PLAY：{play_evidence}")
+        };
+        add_warning(
+            warnings,
+            &format!(
+                "RTSP SETUP 已协商 {} {}（PT {}，{} → {}），但抓包中未见该媒体 RTP；{}；需判断是播放启动失败、设备未发送、网络阻断或抓包点遗漏",
+                first.media_type,
+                first.name,
+                payload_types,
+                binding.source,
+                binding.destination,
+                play_evidence
+            ),
+        );
+    }
 }
 
 impl Capture<'_> {
@@ -340,6 +583,18 @@ impl Capture<'_> {
         self.summary.parsed_transport_frames += 1;
         match packet.transport {
             Payload::Udp(bytes) => {
+                let rtcp_binding = self.udp_bindings.iter().rev().find(|(interface, binding)| {
+                    *interface == frame.meta.interface
+                        && binding.rtcp_source == packet.source
+                        && binding.rtcp_destination == packet.destination
+                });
+                if rtcp_binding.is_some() && parse_rtcp_compound(bytes).is_err() {
+                    add_warning(
+                        &mut self.summary.warnings,
+                        "协商的 RTCP 端口收到无法完整解析的报文；已按 RTCP 保留为控制面缺口，未误计为独立 RTP 流",
+                    );
+                    return Ok(());
+                }
                 let binding = self.udp_bindings.iter().rev().find(|(interface, binding)| {
                     *interface == frame.meta.interface
                         && binding.source.ip == packet.source.ip
@@ -349,7 +604,9 @@ impl Capture<'_> {
                 let codec = bytes.get(1).and_then(|pt| {
                     binding.and_then(|(_, binding)| binding.codecs.get(&(pt & 127)).cloned())
                 });
-                let session_id = binding.and_then(|(_, binding)| binding.session.clone());
+                let session_id = binding
+                    .or(rtcp_binding)
+                    .and_then(|(_, binding)| binding.session.clone());
                 self.payload(
                     FlowKey {
                         interface: frame.meta.interface.clone(),
@@ -399,6 +656,7 @@ impl Capture<'_> {
                             && connection.syn_sequence != Some(sequence)))
                 {
                     self.finish_connection(&key, &mut connection)?;
+                    self.archive_session(&mut connection.session);
                     self.next_connection += 1;
                     connection = Connection::new(self.next_connection);
                 }
@@ -406,6 +664,13 @@ impl Capture<'_> {
                     connection.syn_sequence = Some(sequence);
                 }
                 connection.observed_payload |= !data.is_empty();
+                for message in tcp::push_loose_rtsp(
+                    &mut connection.loose_rtsp_decoders[direction],
+                    data,
+                    &frame.meta,
+                ) {
+                    self.message(&key, &mut connection, direction, message)?;
+                }
                 for chunk in connection.directions[direction].push(
                     sequence,
                     flags & 2 != 0,
@@ -437,6 +702,21 @@ impl Capture<'_> {
                     self.message(key, connection, direction, message)?;
                 }
             }
+            let mut partial_rtsp = false;
+            if let Some(message) = connection.decoders[direction].finish_partial_rtsp() {
+                self.message(key, connection, direction, message)?;
+                partial_rtsp = true;
+            }
+            if let Some(message) = connection.loose_rtsp_decoders[direction].finish_partial_rtsp() {
+                self.message(key, connection, direction, message)?;
+                partial_rtsp = true;
+            }
+            if partial_rtsp {
+                add_warning(
+                    &mut self.summary.warnings,
+                    "RTSP 响应头未完整终止（可能来自抓包缺口或服务端格式异常）；已保留可验证的状态行和 CSeq，正文与后续头字段不作推断",
+                );
+            }
             let gaps = connection.directions[direction].gaps;
             let discarded = connection.decoders[direction].discarded_bytes
                 + connection.decoders[direction].unfinished_bytes() as u64;
@@ -459,6 +739,17 @@ impl Capture<'_> {
         Ok(())
     }
 
+    fn archive_session(&mut self, session: &mut Session) {
+        session.finish_pending_transactions();
+        if session.protocol.connected
+            || !session.protocol.transactions.is_empty()
+            || !session.protocol.media.is_empty()
+        {
+            self.completed_sessions
+                .push((session.protocol.clone(), session.sdp.clone()));
+        }
+    }
+
     fn message(
         &mut self,
         key: &ConnectionKey,
@@ -472,9 +763,11 @@ impl Capture<'_> {
             (&key.high, &key.low)
         };
         match message {
-            tcp::Message::Rtsp { text } => {
+            tcp::Message::Rtsp { text, meta } => {
                 let previous_udp = connection.session.udp.len();
-                connection.session.observe(&text, source, destination);
+                connection
+                    .session
+                    .observe(&text, source, destination, meta.timestamp_micros);
                 for binding in &connection.session.udp[previous_udp..] {
                     if self.udp_bindings.len() < MAX_STREAMS {
                         self.udp_bindings
@@ -916,6 +1209,9 @@ fn finish_stream(mut state: StreamState, base: u64) -> Result<CapturedStream, Ca
     if state.spool.is_file() {
         let mut reader = BufReader::new(File::open(&state.spool)?);
         while let Some(record) = Record::read(&mut reader)? {
+            if streamscope_core::analysis_cancellation_requested() {
+                return Err(CaptureError::Cancelled);
+            }
             if records.len() as u64 >= MAX_SAMPLE_PACKETS
                 || analysis_bytes.saturating_add(record.payload.len() as u64) > MAX_SAMPLE_BYTES
             {
@@ -1010,6 +1306,7 @@ fn finish_stream(mut state: StreamState, base: u64) -> Result<CapturedStream, Ca
                 .map(|record| ((record.timestamp, record.sequence), record))
                 .collect();
             annotate_frames(&mut candidate.frames, &sample_ranges, &locations, base);
+            annotate_nalus(&mut candidate.nalus, &sample_ranges, &records, base);
             for issue in &candidate.issues {
                 if state.identity.events.len() >= MAX_EVENTS {
                     break;
@@ -1094,6 +1391,7 @@ fn finish_stream(mut state: StreamState, base: u64) -> Result<CapturedStream, Ca
                 .map(|record| ((record.timestamp, record.sequence), record))
                 .collect();
             annotate_frames(&mut candidate.frames, &sample_ranges, &locations, base);
+            annotate_nalus(&mut candidate.nalus, &sample_ranges, &records, base);
             for issue in &candidate.issues {
                 if state.identity.events.len() >= MAX_EVENTS {
                     break;
@@ -1264,6 +1562,56 @@ fn annotate_frames(
             frame.sample_end_offset =
                 Some(ranges.fold(sample_end, |maximum, (_, end)| maximum.max(end)));
         }
+    }
+}
+
+fn annotate_nalus(
+    nalus: &mut [VideoNaluEvidence],
+    sample_ranges: &[Option<(u64, u64)>],
+    records: &[Record],
+    base: u64,
+) {
+    const MAX_PACKET_ASSOCIATIONS_PER_NALU: usize = 20_000;
+    for nalu in nalus {
+        if let Some((start, end)) = nalu
+            .nalu_number
+            .checked_sub(1)
+            .and_then(|index| sample_ranges.get(index as usize))
+            .and_then(|range| *range)
+        {
+            nalu.sample_start_offset = Some(start);
+            nalu.sample_end_offset = Some(end);
+        }
+        let Some((timestamp, first, last)) = nalu
+            .rtp_timestamp
+            .zip(nalu.first_sequence)
+            .zip(nalu.last_sequence)
+            .map(|((timestamp, first), last)| (timestamp, first, last))
+        else {
+            continue;
+        };
+        let matches_sequence = |sequence: u16| {
+            if first <= last {
+                (first..=last).contains(&sequence)
+            } else {
+                sequence >= first || sequence <= last
+            }
+        };
+        let mut matched = 0_usize;
+        for record in records
+            .iter()
+            .filter(|record| record.timestamp == timestamp && matches_sequence(record.sequence))
+        {
+            matched += 1;
+            if nalu.packets.len() < MAX_PACKET_ASSOCIATIONS_PER_NALU {
+                nalu.packets.push(VideoPacketAssociation {
+                    packet_number: record.number,
+                    rtp_sequence: record.sequence,
+                    offset_ms: record.micros.saturating_sub(base) / 1_000,
+                });
+            }
+        }
+        nalu.packet_associations_truncated = matched > MAX_PACKET_ASSOCIATIONS_PER_NALU;
     }
 }
 

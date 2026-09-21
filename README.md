@@ -17,7 +17,7 @@ StreamScope 是面向摄像头、NVR 和嵌入式音视频设备开发者的 RTS
 - RTP 丢包、连续缺口、乱序、重复、时间戳、SSRC、Payload Type 与 Jitter 统计。
 - H.264 Single NAL、STAP-A、FU-A、SPS、PPS、Slice、帧边界、IDR 和 GOP 分析。
 - H.265/HEVC Single NAL、AP、FU、VPS、SPS、PPS、Slice、帧边界、IDR、CRA 和 GOP 分析。
-- 48 条证据驱动诊断规则，包含音频时间轴、静音、削波、电平突变、声道失衡、立体声反相和高可信音画时钟偏差诊断，输出严重度、置信度、证据、影响、建议和复验方法。
+- 55 条证据驱动诊断规则，包含音频时间轴、静音、削波、电平突变、声道失衡、立体声反相和高可信音画时钟偏差诊断，输出严重度、置信度、证据、影响、建议和复验方法。
 - 统一异常时间线和 ECharts 图形视图。
 - 通过软件文件选择器导入 Annex B H.264、Annex B H.265/HEVC、PCAP 或 PCAPNG。
 - 对同一 RTSP 地址自动执行 TCP/UDP 对比，并生成独立对比报告。
@@ -26,12 +26,12 @@ StreamScope 是面向摄像头、NVR 和嵌入式音视频设备开发者的 RTS
 - 质量分析和播放预览相互独立：音频质量覆盖完整可解码样本，软件内试听样本最多保留 60 秒，报告会分别标明实际覆盖范围。
 - 可直接导入 WAV、FLAC、AAC、M4A、MP3、Ogg 或 Opus 音频文件，独立分析和试听，不要求存在视频轨。
 - 回放页可将当前音频轨另存为 WAV、MP3、M4A、FLAC 或 Ogg，也可按诊断区间单独导出；视频预览可另存为 MP4。导出在后台完成，不启动外部播放器或命令窗口。
-- RTSP 采集过程中按音频轨实时显示 RTP 包数、负载量和平均码率；PCMA/PCMU 额外显示累计 Peak/RMS。AAC/Opus 的完整 PCM 质量指标在采集结束后生成。
+- RTSP 采集过程中按音频轨实时显示 RTP 包数、负载量、平均码率和滚动 PCM 波形；PCMA/PCMU 直接解码，AAC/Opus 通过内置 FFmpeg 在线解码，均显示真实 Peak/RMS。完整频谱、Mel 时频图、响度和异常区间在采集结束后生成。
 - PCAP/PCAPNG 中音频、视频按各自端点、通道和 SSRC 独立分流；有共同 RTCP CNAME 与 Sender Report 时计算音视频时钟偏差和多点漂移。
 
 抓包多流分析：按捕获接口、方向端点、TCP 连接实例、Interleaved Channel 和 SSRC 分组，不限制为两路。每流独立统计序列缺口、时长、码率、H.264/H.265 和解码结果；不同 PT 不直接拆流，编码发生变化时停止混合解包并提示。支持 Ethernet/VLAN、原始 IP、Linux SLL/SLL2、IPv4/IPv6，以及 TCP 分段、乱序和重传重组。
 
-当前限制：不重组 IP 分片；缺帧、截断和 TCP 重组缺口会明确降低证据可信度。未知动态编码仅作为 RTP 候选，只有发现足够的 H.264 或 H.265 参数集与帧证据后才推断编码；H.265 RTP 当前支持 RFC 7798 常见非交织模式，不支持 DONL/DOND 交织模式。MP4A-LATM 仅保留 RTP 证据。软件可依据高可信 RTCP 偏差协调两个预览播放器，但还不是采集中的共享时钟连续播放；RTCP 偏差只能证明发送时钟映射，不能替代闪光/脉冲等内容级同步验证。RTSPS、ONVIF、完整 RTCP Reception Report 统计和 PDF 直出尚未实现。HTML 报告可使用系统打印功能另存为 PDF。
+当前限制：不重组 IP 分片；缺帧、截断和 TCP 重组缺口会明确降低证据可信度。未知动态编码仅作为 RTP 候选，只有发现足够的 H.264 或 H.265 参数集与帧证据后才推断编码；H.265 RTP 当前支持 RFC 7798 常见非交织模式，不支持 DONL/DOND 交织模式。MP4A-LATM 仅保留 RTP 证据。软件可依据高可信 RTCP 偏差协调两个预览播放器，并能在深入分析时配对明显闪光与蜂鸣/脉冲事件；普通节目内容没有足够显著事件时会保持“证据不足”，不能把 RTCP 时钟映射解释为内容同步。RTSPS、ONVIF、完整 RTCP Reception Report 统计和 PDF 直出尚未实现。HTML 报告可使用系统打印功能另存为 PDF。
 
 ### 多路抓包操作
 
