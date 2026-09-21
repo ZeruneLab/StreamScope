@@ -1,0 +1,641 @@
+# StreamScope FFmpeg 9.0.1 decoder-observation patch.
+# FFmpeg remains under its upstream LGPL/GPL terms; distribute the matching
+# source and this patch with binaries as described in tools/video-worker/README.md.
+--- a/libavutil/video_enc_params.h
++++ b/libavutil/video_enc_params.h
+@@ -56,6 +56,9 @@
+      */
+     AV_VIDEO_ENC_PARAMS_H264,
+ 
++    /** HEVC decoder block observations exported by the StreamScope build. */
++    AV_VIDEO_ENC_PARAMS_H265,
++
+     /*
+      * MPEG-2-compatible quantizer.
+      *
+@@ -134,6 +137,29 @@
+      * corresponding per-frame value.
+      */
+     int32_t delta_qp;
++
++    /** Codec-native block flags. H.264 stores the decoded mb_type bit mask. */
++    uint32_t type_flags;
++    /** H.264 sub_mb_type flags, one entry per 8x8 macroblock partition. */
++    uint16_t sub_type_flags[4];
++    /** Reference-list indices. H.264 uses one entry per 8x8 partition. */
++    int8_t ref_idx[2][4];
++    /** Resolved reference picture order count where the decoder can prove it. */
++    int32_t ref_poc[2][4];
++    /** Codec-native quarter-sample motion components for list 0 and list 1. */
++    int16_t motion[2][2];
++    /** HEVC prediction flags; zero for records that only carry QP. */
++    uint8_t prediction_flags;
++    /** Codec tree depth for hierarchical HEVC records. */
++    uint8_t tree_depth;
++    /** HEVC PredMode value. */
++    uint8_t prediction_mode;
++    /** HEVC PartMode value. */
++    uint8_t partition_mode;
++    /** HEVC transform CBF flags: bit 0 luma, bit 1 Cb, bit 2 Cr. */
++    uint8_t transform_flags;
++    /** 1=H.264 MB, 2=HEVC min-CB QP, 3=min-PU sample, 4=CTU, 5=CU, 6=PU, 7=TU. */
++    uint8_t block_level;
+ } AVVideoBlockParams;
+ 
+ /**
+--- a/libavcodec/h264dec.h
++++ b/libavcodec/h264dec.h
+@@ -129,6 +129,11 @@
+ 
+     int8_t *ref_index[2];   ///< RefStruct reference
+ 
++    /** Resolved reference POC for every 8x8 partition; RefStruct reference. */
++    int32_t (*streamscope_ref_poc)[2][4];
++    /** Decoded sub_mb_type flags for every 8x8 macroblock partition. */
++    uint16_t (*streamscope_sub_mb_type)[4];
++
+     int field_poc[2];       ///< top/bottom POC
+     int poc;                ///< frame POC
+     int frame_num;          ///< frame_num (raw frame_num from slice header)
+--- a/libavcodec/h264_picture.c
++++ b/libavcodec/h264_picture.c
+@@ -55,6 +55,8 @@
+         av_refstruct_unref(&pic->motion_val_base[i]);
+         av_refstruct_unref(&pic->ref_index[i]);
+     }
++    av_refstruct_unref(&pic->streamscope_ref_poc);
++    av_refstruct_unref(&pic->streamscope_sub_mb_type);
+     av_refstruct_unref(&pic->decode_error_flags);
+ 
+     memset((uint8_t*)pic + off, 0, sizeof(*pic) - off);
+@@ -70,6 +72,8 @@
+         av_refstruct_replace(&dst->motion_val_base[i], src->motion_val_base[i]);
+         av_refstruct_replace(&dst->ref_index[i],       src->ref_index[i]);
+     }
++    av_refstruct_replace(&dst->streamscope_ref_poc, src->streamscope_ref_poc);
++    av_refstruct_replace(&dst->streamscope_sub_mb_type, src->streamscope_sub_mb_type);
+ 
+     av_refstruct_replace(&dst->hwaccel_picture_private,
+                           src->hwaccel_picture_private);
+--- a/libavcodec/h264_slice.c
++++ b/libavcodec/h264_slice.c
+@@ -259,6 +259,18 @@
+         pic->motion_val[i] = pic->motion_val_base[i] + 4;
+     }
+ 
++    if (h->avctx->export_side_data & AV_CODEC_EXPORT_DATA_VIDEO_ENC_PARAMS) {
++        size_t count = h->mb_stride * h->mb_height;
++        pic->streamscope_ref_poc = av_refstruct_allocz(count * sizeof(*pic->streamscope_ref_poc));
++        pic->streamscope_sub_mb_type = av_refstruct_allocz(count * sizeof(*pic->streamscope_sub_mb_type));
++        if (!pic->streamscope_ref_poc || !pic->streamscope_sub_mb_type)
++            goto fail;
++        for (size_t mb = 0; mb < count; mb++)
++            for (int list = 0; list < 2; list++)
++                for (int part = 0; part < 4; part++)
++                    pic->streamscope_ref_poc[mb][list][part] = INT32_MIN;
++    }
++
+     pic->pps = av_refstruct_ref_c(h->ps.pps);
+ 
+     pic->mb_width  = h->mb_width;
+@@ -2561,6 +2573,32 @@
+     }
+ }
+ 
++static void streamscope_store_ref_poc(const H264Context *h,
++                                      const H264SliceContext *sl)
++{
++    H264Picture *pic = h->cur_pic_ptr;
++    int mb_xy;
++
++    if (!pic->streamscope_ref_poc)
++        return;
++
++    mb_xy = sl->mb_x + sl->mb_y * h->mb_stride;
++    memset(pic->streamscope_sub_mb_type[mb_xy], 0,
++           sizeof(pic->streamscope_sub_mb_type[mb_xy]));
++    if (IS_8X8(pic->mb_type[mb_xy]))
++        memcpy(pic->streamscope_sub_mb_type[mb_xy], sl->sub_mb_type,
++               sizeof(pic->streamscope_sub_mb_type[mb_xy]));
++    for (int list = 0; list < 2; list++) {
++        for (int part = 0; part < 4; part++) {
++            int ref = pic->ref_index[list][4 * mb_xy + part];
++            if (ref >= 0 && ref < FF_ARRAY_ELEMS(sl->ref_list[list]) &&
++                sl->ref_list[list][ref].parent)
++                pic->streamscope_ref_poc[mb_xy][list][part] =
++                    sl->ref_list[list][ref].poc;
++        }
++    }
++}
++
+ static int decode_slice(struct AVCodecContext *avctx, void *arg)
+ {
+     H264SliceContext *sl = arg;
+@@ -2621,8 +2659,10 @@
+ 
+             ret = ff_h264_decode_mb_cabac(h, sl);
+ 
+-            if (ret >= 0)
++            if (ret >= 0) {
+                 ff_h264_hl_decode_mb(h, sl);
++                streamscope_store_ref_poc(h, sl);
++            }
+ 
+             // FIXME optimal? or let mb_decode decode 16x32 ?
+             if (ret >= 0 && FRAME_MBAFF(h)) {
+@@ -2630,8 +2670,10 @@
+ 
+                 ret = ff_h264_decode_mb_cabac(h, sl);
+ 
+-                if (ret >= 0)
++                if (ret >= 0) {
+                     ff_h264_hl_decode_mb(h, sl);
++                    streamscope_store_ref_poc(h, sl);
++                }
+                 sl->mb_y--;
+             }
+             eos = get_cabac_terminate(&sl->cabac);
+@@ -2692,16 +2734,20 @@
+ 
+             ret = ff_h264_decode_mb_cavlc(h, sl);
+ 
+-            if (ret >= 0)
++            if (ret >= 0) {
+                 ff_h264_hl_decode_mb(h, sl);
++                streamscope_store_ref_poc(h, sl);
++            }
+ 
+             // FIXME optimal? or let mb_decode decode 16x32 ?
+             if (ret >= 0 && FRAME_MBAFF(h)) {
+                 sl->mb_y++;
+                 ret = ff_h264_decode_mb_cavlc(h, sl);
+ 
+-                if (ret >= 0)
++                if (ret >= 0) {
+                     ff_h264_hl_decode_mb(h, sl);
++                    streamscope_store_ref_poc(h, sl);
++                }
+                 sl->mb_y--;
+             }
+ 
+--- a/libavcodec/h264dec.c
++++ b/libavcodec/h264dec.c
+@@ -852,6 +852,21 @@
+             b->h     = 16;
+ 
+             b->delta_qp = p->qscale_table[mb_xy] - par->qp;
++            b->type_flags = p->mb_type[mb_xy];
++            b->block_level = 1;
++            memset(b->sub_type_flags, 0, sizeof(b->sub_type_flags));
++            if (p->streamscope_sub_mb_type)
++                memcpy(b->sub_type_flags, p->streamscope_sub_mb_type[mb_xy],
++                       sizeof(b->sub_type_flags));
++            memset(b->ref_idx, -1, sizeof(b->ref_idx));
++            for (int list = 0; list < 2; list++)
++                for (int part = 0; part < 4; part++)
++                    b->ref_poc[list][part] = p->streamscope_ref_poc ?
++                        p->streamscope_ref_poc[mb_xy][list][part] : INT32_MIN;
++            if (p->ref_index[0] && USES_LIST(p->mb_type[mb_xy], 0))
++                memcpy(b->ref_idx[0], &p->ref_index[0][4 * mb_xy], 4);
++            if (p->ref_index[1] && USES_LIST(p->mb_type[mb_xy], 1))
++                memcpy(b->ref_idx[1], &p->ref_index[1][4 * mb_xy], 4);
+         }
+ 
+     return 0;
+--- a/libavcodec/hevc/hevcdec.h
++++ b/libavcodec/hevc/hevcdec.h
+@@ -464,11 +464,16 @@
+     //  CU
+     uint8_t                *skip_flag;
+     uint8_t                *tab_ct_depth;
++    uint8_t                *streamscope_pred_mode;
++    uint8_t                *streamscope_part_mode;
+ 
+     // PU
+     uint8_t                *cbf_luma; // cbf_luma of colocated TU
+     uint8_t                *tab_ipm;
+     uint8_t                *is_pcm;
++    uint8_t                *streamscope_tu_log2_size;
++    uint8_t                *streamscope_tu_depth;
++    uint8_t                *streamscope_tu_flags;
+ 
+     // CTB-level flags affecting loop filter operation
+     uint8_t                *filter_slice_edges;
+--- a/libavcodec/hevc/hevcdec.c
++++ b/libavcodec/hevc/hevcdec.c
+@@ -39,6 +39,7 @@
+ #include "libavutil/tdrdi.h"
+ #include "libavutil/timecode.h"
+ #include "libavutil/refstruct.h"
++#include "libavutil/video_enc_params.h"
+ 
+ #include "libavcodec/aom_film_grain.h"
+ #include "libavcodec/bswapdsp.h"
+@@ -78,10 +79,15 @@
+ 
+     av_freep(&l->skip_flag);
+     av_freep(&l->tab_ct_depth);
++    av_freep(&l->streamscope_pred_mode);
++    av_freep(&l->streamscope_part_mode);
+ 
+     av_freep(&l->tab_ipm);
+     av_freep(&l->cbf_luma);
+     av_freep(&l->is_pcm);
++    av_freep(&l->streamscope_tu_log2_size);
++    av_freep(&l->streamscope_tu_depth);
++    av_freep(&l->streamscope_tu_flags);
+ 
+     av_freep(&l->qp_y_tab);
+     av_freep(&l->tab_slice_address);
+@@ -109,6 +115,8 @@
+                            ((height >> log2_min_cb_size) + 1);
+     int ctb_count        = sps->ctb_width * sps->ctb_height;
+     int min_pu_size      = sps->min_pu_width * sps->min_pu_height;
++    int min_cb_size      = sps->min_cb_width * sps->min_cb_height;
++    int min_tb_size      = sps->min_tb_width * sps->min_tb_height;
+ 
+     l->bs_width  = (width  >> 2) + 1;
+     l->bs_height = (height >> 2) + 1;
+@@ -120,13 +128,21 @@
+ 
+     l->skip_flag    = av_malloc_array(sps->min_cb_height, sps->min_cb_width);
+     l->tab_ct_depth = av_malloc_array(sps->min_cb_height, sps->min_cb_width);
+-    if (!l->skip_flag || !l->tab_ct_depth)
++    l->streamscope_pred_mode = av_malloc(min_cb_size);
++    l->streamscope_part_mode = av_malloc(min_cb_size);
++    if (!l->skip_flag || !l->tab_ct_depth ||
++        !l->streamscope_pred_mode || !l->streamscope_part_mode)
+         goto fail;
+ 
+     l->cbf_luma = av_malloc_array(sps->min_tb_width, sps->min_tb_height);
+     l->tab_ipm  = av_mallocz(min_pu_size);
+     l->is_pcm   = av_malloc_array(sps->min_pu_width + 1, sps->min_pu_height + 1);
+-    if (!l->tab_ipm || !l->cbf_luma || !l->is_pcm)
++    l->streamscope_tu_log2_size = av_mallocz(min_tb_size);
++    l->streamscope_tu_depth = av_malloc(min_tb_size);
++    l->streamscope_tu_flags = av_malloc(min_tb_size);
++    if (!l->tab_ipm || !l->cbf_luma || !l->is_pcm ||
++        !l->streamscope_tu_log2_size || !l->streamscope_tu_depth ||
++        !l->streamscope_tu_flags)
+         goto fail;
+ 
+     l->filter_slice_edges = av_mallocz(ctb_count);
+@@ -1620,6 +1636,24 @@
+                                  blk_idx, cbf_luma, cbf_cb, cbf_cr);
+         if (ret < 0)
+             return ret;
++        if (s->avctx->export_side_data & AV_CODEC_EXPORT_DATA_VIDEO_ENC_PARAMS) {
++            int tu_size = 1 << log2_trafo_size;
++            int flags = (cbf_luma != 0) |
++                        ((cbf_cb[0] || cbf_cb[1]) << 1) |
++                        ((cbf_cr[0] || cbf_cr[1]) << 2);
++            int x_start = x0 >> log2_min_tu_size;
++            int y_start = y0 >> log2_min_tu_size;
++            int x_count = tu_size >> log2_min_tu_size;
++            int y_count = tu_size >> log2_min_tu_size;
++            for (int y = 0; y < y_count && y_start + y < sps->min_tb_height; y++) {
++                for (int x = 0; x < x_count && x_start + x < sps->min_tb_width; x++) {
++                    int index = (y_start + y) * min_tu_width + x_start + x;
++                    l->streamscope_tu_log2_size[index] = log2_trafo_size;
++                    l->streamscope_tu_depth[index] = trafo_depth;
++                    l->streamscope_tu_flags[index] = flags;
++                }
++            }
++        }
+         // TODO: store cbf_luma somewhere else
+         if (cbf_luma) {
+             int i, j;
+@@ -2586,6 +2620,15 @@
+     }
+ 
+     set_ct_depth(sps, l->tab_ct_depth, x0, y0, log2_cb_size, lc->ct_depth);
++    if (s->avctx->export_side_data & AV_CODEC_EXPORT_DATA_VIDEO_ENC_PARAMS) {
++        int x_count = FFMIN(length, sps->min_cb_width - x_cb);
++        int y_count = FFMIN(length, sps->min_cb_height - y_cb);
++        for (y = 0; y < y_count; y++) {
++            int offset = (y_cb + y) * min_cb_width + x_cb;
++            memset(&l->streamscope_pred_mode[offset], lc->cu.pred_mode, x_count);
++            memset(&l->streamscope_part_mode[offset], lc->cu.part_mode, x_count);
++        }
++    }
+ 
+     return 0;
+ }
+@@ -3270,6 +3313,11 @@
+     memset(l->horizontal_bs, 0, l->bs_width * l->bs_height);
+     memset(l->vertical_bs,   0, l->bs_width * l->bs_height);
+     memset(l->cbf_luma,      0, sps->min_tb_width * sps->min_tb_height);
++    memset(l->streamscope_pred_mode, 0, sps->min_cb_width * sps->min_cb_height);
++    memset(l->streamscope_part_mode, 0, sps->min_cb_width * sps->min_cb_height);
++    memset(l->streamscope_tu_log2_size, 0, sps->min_tb_width * sps->min_tb_height);
++    memset(l->streamscope_tu_depth, 0, sps->min_tb_width * sps->min_tb_height);
++    memset(l->streamscope_tu_flags, 0, sps->min_tb_width * sps->min_tb_height);
+     memset(l->is_pcm,        0, (sps->min_pu_width + 1) * (sps->min_pu_height + 1));
+     memset(l->tab_slice_address, -1, pic_size_in_ctb * sizeof(*l->tab_slice_address));
+ 
+@@ -3471,6 +3519,269 @@
+     return err;
+     }
+ 
++static void streamscope_init_hevc_block(AVVideoBlockParams *b)
++{
++    memset(b->ref_idx, -1, sizeof(b->ref_idx));
++    for (int list = 0; list < 2; list++)
++        for (int part = 0; part < 4; part++)
++            b->ref_poc[list][part] = INT32_MIN;
++}
++
++static unsigned int streamscope_hevc_part_count(uint8_t part_mode)
++{
++    if (part_mode == PART_NxN)
++        return 4;
++    return part_mode == PART_2Nx2N ? 1 : 2;
++}
++
++static void streamscope_hevc_pu_geometry(uint8_t part_mode, unsigned int part,
++                                         int x, int y, int size,
++                                         int *pu_x, int *pu_y,
++                                         int *pu_w, int *pu_h)
++{
++    *pu_x = x;
++    *pu_y = y;
++    *pu_w = size;
++    *pu_h = size;
++    switch (part_mode) {
++    case PART_2NxN:
++        *pu_y += part * size / 2;
++        *pu_h = size / 2;
++        break;
++    case PART_Nx2N:
++        *pu_x += part * size / 2;
++        *pu_w = size / 2;
++        break;
++    case PART_2NxnU:
++        *pu_y += part ? size / 4 : 0;
++        *pu_h = part ? size * 3 / 4 : size / 4;
++        break;
++    case PART_2NxnD:
++        *pu_y += part ? size * 3 / 4 : 0;
++        *pu_h = part ? size / 4 : size * 3 / 4;
++        break;
++    case PART_nLx2N:
++        *pu_x += part ? size / 4 : 0;
++        *pu_w = part ? size * 3 / 4 : size / 4;
++        break;
++    case PART_nRx2N:
++        *pu_x += part ? size * 3 / 4 : 0;
++        *pu_w = part ? size / 4 : size * 3 / 4;
++        break;
++    case PART_NxN:
++        *pu_x += (part & 1) * size / 2;
++        *pu_y += (part >> 1) * size / 2;
++        *pu_w = *pu_h = size / 2;
++        break;
++    default:
++        break;
++    }
++}
++
++static void streamscope_fill_hevc_prediction(const HEVCSPS *sps,
++                                             HEVCFrame *out,
++                                             AVVideoBlockParams *b)
++{
++    unsigned int x = FFMIN(b->src_x >> sps->log2_min_pu_size,
++                           sps->min_pu_width - 1);
++    unsigned int y = FFMIN(b->src_y >> sps->log2_min_pu_size,
++                           sps->min_pu_height - 1);
++    const MvField *mv = &out->tab_mvf[y * sps->min_pu_width + x];
++    const RefPicList *rpl = ff_hevc_get_ref_list(out, b->src_x, b->src_y);
++
++    b->prediction_flags = mv->pred_flag;
++    b->ref_idx[0][0] = mv->ref_idx[0];
++    b->ref_idx[1][0] = mv->ref_idx[1];
++    b->motion[0][0] = mv->mv[0].x;
++    b->motion[0][1] = mv->mv[0].y;
++    b->motion[1][0] = mv->mv[1].x;
++    b->motion[1][1] = mv->mv[1].y;
++    for (int list = 0; list < 2; list++) {
++        int ref = mv->ref_idx[list];
++        if (rpl && ref >= 0 && ref < rpl[list].nb_refs && rpl[list].ref[ref])
++            b->ref_poc[list][0] = rpl[list].ref[ref]->poc;
++    }
++}
++
++static int streamscope_export_hevc_blocks(HEVCContext *s, HEVCLayerContext *l,
++                                          HEVCFrame *out)
++{
++    const HEVCSPS *sps = l->sps;
++    unsigned int qp_count = sps->min_cb_width * sps->min_cb_height;
++    unsigned int mv_count = 0;
++    unsigned int ctu_count = sps->ctb_width * sps->ctb_height;
++    unsigned int cu_count = 0;
++    unsigned int pu_count = 0;
++    unsigned int tu_count = 0;
++    unsigned int block = 0;
++    AVVideoEncParams *par;
++
++    if (!(s->avctx->export_side_data & AV_CODEC_EXPORT_DATA_VIDEO_ENC_PARAMS) ||
++        s->avctx->hwaccel || !out->tab_mvf)
++        return 0;
++
++    for (unsigned int i = 0; i < sps->min_pu_width * sps->min_pu_height; i++)
++        mv_count += out->tab_mvf[i].pred_flag != 0;
++    for (unsigned int y = 0; y < sps->min_cb_height; y++) {
++        for (unsigned int x = 0; x < sps->min_cb_width; x++) {
++            unsigned int index = y * sps->min_cb_width + x;
++            unsigned int depth = l->tab_ct_depth[index];
++            unsigned int size = 1U << (sps->log2_ctb_size - depth);
++            unsigned int px = x << sps->log2_min_cb_size;
++            unsigned int py = y << sps->log2_min_cb_size;
++            if (px < sps->width && py < sps->height &&
++                !(px & (size - 1)) && !(py & (size - 1))) {
++                unsigned int parts = streamscope_hevc_part_count(l->streamscope_part_mode[index]);
++                cu_count++;
++                for (unsigned int part = 0; part < parts; part++) {
++                    int pu_x, pu_y, pu_w, pu_h;
++                    streamscope_hevc_pu_geometry(l->streamscope_part_mode[index], part,
++                                                 px, py, size,
++                                                 &pu_x, &pu_y, &pu_w, &pu_h);
++                    (void)pu_w;
++                    (void)pu_h;
++                    pu_count += pu_x < sps->width && pu_y < sps->height;
++                }
++            }
++        }
++    }
++    for (unsigned int y = 0; y < sps->min_tb_height; y++) {
++        for (unsigned int x = 0; x < sps->min_tb_width; x++) {
++            unsigned int index = y * sps->min_tb_width + x;
++            unsigned int log2_size = l->streamscope_tu_log2_size[index];
++            unsigned int size = log2_size ? 1U << log2_size : 0;
++            unsigned int px = x << sps->log2_min_tb_size;
++            unsigned int py = y << sps->log2_min_tb_size;
++            tu_count += size && px < sps->width && py < sps->height &&
++                        !(px & (size - 1)) && !(py & (size - 1));
++        }
++    }
++
++    par = av_video_enc_params_create_side_data(out->f, AV_VIDEO_ENC_PARAMS_H265,
++                                               qp_count + mv_count + ctu_count +
++                                               cu_count + pu_count + tu_count);
++    if (!par)
++        return AVERROR(ENOMEM);
++    par->qp = 0;
++
++    for (unsigned int y = 0; y < sps->min_cb_height; y++) {
++        for (unsigned int x = 0; x < sps->min_cb_width; x++) {
++            unsigned int index = y * sps->min_cb_width + x;
++            AVVideoBlockParams *b = av_video_enc_params_block(par, block++);
++            b->src_x = x << sps->log2_min_cb_size;
++            b->src_y = y << sps->log2_min_cb_size;
++            b->w = b->h = 1 << sps->log2_min_cb_size;
++            b->delta_qp = l->qp_y_tab[index];
++            b->type_flags = l->tab_ct_depth[index];
++            b->block_level = 2;
++            streamscope_init_hevc_block(b);
++        }
++    }
++
++    for (unsigned int y = 0; y < sps->min_pu_height; y++) {
++        for (unsigned int x = 0; x < sps->min_pu_width; x++) {
++            const MvField *mv = &out->tab_mvf[y * sps->min_pu_width + x];
++            AVVideoBlockParams *b;
++            if (!mv->pred_flag)
++                continue;
++            b = av_video_enc_params_block(par, block++);
++            b->src_x = x << sps->log2_min_pu_size;
++            b->src_y = y << sps->log2_min_pu_size;
++            b->w = b->h = 1 << sps->log2_min_pu_size;
++            b->block_level = 3;
++            streamscope_init_hevc_block(b);
++            streamscope_fill_hevc_prediction(sps, out, b);
++        }
++    }
++
++    for (unsigned int y = 0; y < sps->ctb_height; y++) {
++        for (unsigned int x = 0; x < sps->ctb_width; x++) {
++            AVVideoBlockParams *b = av_video_enc_params_block(par, block++);
++            b->src_x = x << sps->log2_ctb_size;
++            b->src_y = y << sps->log2_ctb_size;
++            b->w = FFMIN(1 << sps->log2_ctb_size, sps->width - b->src_x);
++            b->h = FFMIN(1 << sps->log2_ctb_size, sps->height - b->src_y);
++            b->block_level = 4;
++            streamscope_init_hevc_block(b);
++        }
++    }
++
++    for (unsigned int y = 0; y < sps->min_cb_height; y++) {
++        for (unsigned int x = 0; x < sps->min_cb_width; x++) {
++            unsigned int index = y * sps->min_cb_width + x;
++            unsigned int depth = l->tab_ct_depth[index];
++            unsigned int size = 1U << (sps->log2_ctb_size - depth);
++            unsigned int px = x << sps->log2_min_cb_size;
++            unsigned int py = y << sps->log2_min_cb_size;
++            uint8_t part_mode = l->streamscope_part_mode[index];
++            uint8_t pred_mode = l->streamscope_pred_mode[index];
++            unsigned int parts;
++            AVVideoBlockParams *b;
++            if (px >= sps->width || py >= sps->height ||
++                (px & (size - 1)) || (py & (size - 1)))
++                continue;
++
++            b = av_video_enc_params_block(par, block++);
++            b->src_x = px;
++            b->src_y = py;
++            b->w = FFMIN(size, sps->width - px);
++            b->h = FFMIN(size, sps->height - py);
++            b->delta_qp = l->qp_y_tab[index];
++            b->type_flags = depth;
++            b->tree_depth = depth;
++            b->prediction_mode = pred_mode;
++            b->partition_mode = part_mode;
++            b->block_level = 5;
++            streamscope_init_hevc_block(b);
++
++            parts = streamscope_hevc_part_count(part_mode);
++            for (unsigned int part = 0; part < parts; part++) {
++                int pu_x, pu_y, pu_w, pu_h;
++                streamscope_hevc_pu_geometry(part_mode, part, px, py, size,
++                                             &pu_x, &pu_y, &pu_w, &pu_h);
++                if (pu_x >= sps->width || pu_y >= sps->height)
++                    continue;
++                b = av_video_enc_params_block(par, block++);
++                b->src_x = pu_x;
++                b->src_y = pu_y;
++                b->w = FFMIN(pu_w, sps->width - pu_x);
++                b->h = FFMIN(pu_h, sps->height - pu_y);
++                b->tree_depth = depth;
++                b->prediction_mode = pred_mode;
++                b->partition_mode = part_mode;
++                b->block_level = 6;
++                streamscope_init_hevc_block(b);
++                streamscope_fill_hevc_prediction(sps, out, b);
++            }
++        }
++    }
++
++    for (unsigned int y = 0; y < sps->min_tb_height; y++) {
++        for (unsigned int x = 0; x < sps->min_tb_width; x++) {
++            unsigned int index = y * sps->min_tb_width + x;
++            unsigned int log2_size = l->streamscope_tu_log2_size[index];
++            unsigned int size = log2_size ? 1U << log2_size : 0;
++            unsigned int px = x << sps->log2_min_tb_size;
++            unsigned int py = y << sps->log2_min_tb_size;
++            AVVideoBlockParams *b;
++            if (!size || px >= sps->width || py >= sps->height ||
++                (px & (size - 1)) || (py & (size - 1)))
++                continue;
++            b = av_video_enc_params_block(par, block++);
++            b->src_x = px;
++            b->src_y = py;
++            b->w = FFMIN(size, sps->width - px);
++            b->h = FFMIN(size, sps->height - py);
++            b->tree_depth = l->streamscope_tu_depth[index];
++            b->transform_flags = l->streamscope_tu_flags[index];
++            b->block_level = 7;
++            streamscope_init_hevc_block(b);
++        }
++    }
++    av_assert0(block == par->nb_blocks);
++    return 0;
++}
++
+ static int hevc_frame_end(HEVCContext *s, HEVCLayerContext *l)
+ {
+     HEVCFrame *out = l->cur_frame;
+@@ -3509,6 +3820,20 @@
+                 return ret;
+         }
+     }
++    ret = streamscope_export_hevc_blocks(s, l, out);
++    if (ret < 0)
++        return ret;
++    if ((s->avctx->export_side_data & AV_CODEC_EXPORT_DATA_VIDEO_ENC_PARAMS) &&
++        !s->avctx->hwaccel) {
++        const HEVCSPS *sps = l->sps;
++        ret = ff_hevc_output_frames(s, s->layers_active_decode,
++                                    s->layers_active_output,
++                                    sps->temporal_layer[sps->max_sub_layers - 1].num_reorder_pics,
++                                    sps->temporal_layer[sps->max_sub_layers - 1].max_dec_pic_buffering,
++                                    0);
++        if (ret < 0)
++            return ret;
++    }
+     s->sei.picture_hash.is_md5 = 0;
+ 
+     av_log(s->avctx, AV_LOG_DEBUG, "Decoded frame with POC %zu/%d.\n",
+--- a/libavcodec/hevc/refs.c
++++ b/libavcodec/hevc/refs.c
+@@ -283,7 +283,11 @@
+ 
+             for (int i = 0; i < FF_ARRAY_ELEMS(l->DPB); i++) {
+                 HEVCFrame *frame = &l->DPB[i];
+-                if (frame->flags & HEVC_FRAME_FLAG_OUTPUT) {
++                int pending_export =
++                    (s->avctx->export_side_data & AV_CODEC_EXPORT_DATA_VIDEO_ENC_PARAMS) &&
++                    !s->avctx->hwaccel && frame == l->cur_frame &&
++                    !av_frame_get_side_data(frame->f, AV_FRAME_DATA_VIDEO_ENC_PARAMS);
++                if ((frame->flags & HEVC_FRAME_FLAG_OUTPUT) && !pending_export) {
+                     // nb_output counts AUs with an output-pending frame
+                     // in at least one layer
+                     if (!(frame->base_layer_frame >= 0 &&

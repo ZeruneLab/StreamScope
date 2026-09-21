@@ -537,6 +537,8 @@ fn hide_console_window(_command: &mut Command) {}
 
 #[derive(Debug, thiserror::Error)]
 pub enum RtspError {
+    #[error("分析任务已由用户取消")]
+    Cancelled,
     #[error("RTSP URL 无效")]
     InvalidUrl,
     #[error("阶段 1 暂不支持 RTSPS")]
@@ -581,6 +583,9 @@ pub fn analyze_rtsp_capture_with_progress(
     options: RtspClientOptions,
     mut progress: impl FnMut(RtspCaptureProgress),
 ) -> Result<RtspCapture, RtspError> {
+    if streamscope_core::analysis_cancellation_requested() {
+        return Err(RtspError::Cancelled);
+    }
     if let Some(directory) = options.spool_directory.as_deref() {
         std::fs::create_dir_all(directory)?;
     }
@@ -1145,6 +1150,9 @@ fn receive_udp_tracks(
     let mut next_progress = Duration::ZERO;
     let mut buffer = vec![0; 65_536];
     while Instant::now() < deadline {
+        if streamscope_core::analysis_cancellation_requested() {
+            return Err(RtspError::Cancelled);
+        }
         let mut received_any = false;
         for track in tracks.iter_mut() {
             let mut rtcp_frames = Vec::new();
@@ -1403,6 +1411,9 @@ impl Connection {
         let deadline = Instant::now() + duration;
         let mut next_progress = Duration::ZERO;
         while Instant::now() < deadline {
+            if streamscope_core::analysis_cancellation_requested() {
+                return Err(RtspError::Cancelled);
+            }
             while let Some(frame) = self.next_interleaved_frame() {
                 observe_interleaved_track(frame, started.elapsed().as_millis() as u64, tracks);
             }

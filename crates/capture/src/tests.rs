@@ -125,6 +125,9 @@ fn declared_h265_capture_produces_independent_hevc_analysis_and_sample() {
     assert_eq!(h265.sps[0].height, 96);
     assert_eq!(h265.frame_count, 1);
     assert_eq!(h265.idr_frames, 1);
+    assert_eq!(h265.nalus.len(), 4);
+    assert!(h265.nalus.iter().all(|nalu| nalu.packets.len() == 1));
+    assert_eq!(h265.nalus[3].access_unit_number, Some(1));
     assert_eq!(
         stream
             .sample_path
@@ -320,6 +323,18 @@ fn one_stream_loss_does_not_contaminate_another_and_udp_reorder_repairs_fu_a() {
     assert_eq!(a.h264.as_ref().unwrap().incomplete_nalus, 0);
     assert_eq!(b.protocol.rtp.lost_packets, 1);
     assert_eq!(b.h264.as_ref().unwrap().incomplete_nalus, 1);
+    let complete_nalu = &a.h264.as_ref().unwrap().nalus[0];
+    assert_eq!(
+        complete_nalu
+            .packets
+            .iter()
+            .map(|packet| packet.rtp_sequence)
+            .collect::<Vec<_>>(),
+        [10, 11, 12]
+    );
+    assert_eq!(complete_nalu.access_unit_number, Some(1));
+    assert!(complete_nalu.sample_start_offset.is_some());
+    assert!(complete_nalu.sample_end_offset.is_some());
     assert_eq!(
         std::fs::read(a.sample_path.as_ref().unwrap()).unwrap(),
         [0, 0, 0, 1, 0x65, 1, 2, 3]
@@ -537,6 +552,7 @@ fn sample_limit_is_permanent_and_rtp_statistics_continue() {
         states: Vec::new(),
         routes: HashMap::new(),
         connections: HashMap::new(),
+        completed_sessions: Vec::new(),
         udp_bindings: Vec::new(),
         next_connection: 0,
         first_micros: None,

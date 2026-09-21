@@ -121,6 +121,50 @@ export interface ProtocolAnalysis {
   errors: string[];
 }
 
+export interface H264HrdInfo {
+  cpb_count: number;
+  maximum_bit_rate_bps: number;
+  maximum_cpb_size_bits: number;
+  all_cbr: boolean;
+  entries: Array<{
+    bit_rate_bps: number;
+    cpb_size_bits: number;
+    cbr: boolean;
+  }>;
+  initial_cpb_removal_delay_length: number;
+  cpb_removal_delay_length: number;
+  dpb_output_delay_length: number;
+  time_offset_length: number;
+}
+
+export interface H264HrdSimulation {
+  status: "not_declared" | "evidence_insufficient" | "simulated_cbr_single_cpb" | string;
+  schedule: string;
+  sps_id: number | null;
+  cpb_entry_index: number | null;
+  buffering_period_count: number;
+  pic_timing_count: number;
+  simulated_aus: number;
+  minimum_fullness_bits: number | null;
+  maximum_fullness_bits: number | null;
+  overflow_aus: number[];
+  underflow_aus: number[];
+  delay_discontinuities: number[];
+  points: Array<{
+    access_unit: number;
+    sei_nalu: number;
+    access_unit_bits: number;
+    cpb_removal_delay: number;
+    dpb_output_delay: number;
+    fullness_before_removal_bits: number;
+    fullness_after_removal_bits: number;
+    overflow: boolean;
+    underflow: boolean;
+  }>;
+  points_truncated: boolean;
+  limitations: string[];
+}
+
 export interface H264Analysis {
   nalu_count: number;
   complete_nalus: number;
@@ -130,6 +174,7 @@ export interface H264Analysis {
     id: number;
     profile_idc: number;
     level_idc: number;
+    constraint_set3_flag: boolean;
     chroma_format_idc: number;
     bit_depth_luma: number;
     bit_depth_chroma: number;
@@ -140,6 +185,12 @@ export interface H264Analysis {
     height: number;
     progressive: boolean;
     fps_milli: number | null;
+    num_units_in_tick: number | null;
+    time_scale: number | null;
+    nal_hrd: H264HrdInfo | null;
+    vcl_hrd: H264HrdInfo | null;
+    max_num_reorder_frames: number | null;
+    max_dec_frame_buffering: number | null;
   }>;
   pps: Array<{
     id: number;
@@ -182,6 +233,12 @@ export interface H264Analysis {
     boundary_confidence: string;
   }>;
   frame_evidence_truncated: boolean;
+  deep_analysis?: VideoDeepAnalysis | null;
+  nalus: VideoNaluEvidence[];
+  nalu_evidence_truncated: boolean;
+  parameter_changes: VideoParameterChange[];
+  recovery_windows: VideoRecoveryWindow[];
+  hrd_simulation?: H264HrdSimulation;
 }
 
 export interface H265Analysis {
@@ -201,6 +258,8 @@ export interface H265Analysis {
     bit_depth_chroma: number;
     width: number;
     height: number;
+    max_dec_pic_buffering: number | null;
+    max_num_reorder_pics: number | null;
   }>;
   pps: Array<{ id: number; sps_id: number }>;
   frame_count: number;
@@ -217,6 +276,190 @@ export interface H265Analysis {
   issues: H264Analysis["issues"];
   frames: H264Analysis["frames"];
   frame_evidence_truncated: boolean;
+  deep_analysis?: VideoDeepAnalysis | null;
+  nalus: VideoNaluEvidence[];
+  nalu_evidence_truncated: boolean;
+  parameter_changes: VideoParameterChange[];
+  recovery_windows: VideoRecoveryWindow[];
+}
+
+export interface VideoRecoveryWindow {
+  source_frame: number;
+  source_kind: string;
+  source_offset_ms: number | null;
+  first_packet: number | null;
+  last_packet: number | null;
+  next_random_access_frame: number | null;
+  next_random_access_offset_ms: number | null;
+  wait_frames: number | null;
+  wait_ms: number | null;
+  structural_status: "random_access_observed" | "not_observed_in_coverage" | string;
+  visual_status: "post_access_anomaly_candidate" | "not_confirmed" | string;
+  limitations: string[];
+}
+
+export interface VideoParameterChange {
+  nalu_number: number;
+  effective_access_unit: number | null;
+  parameter_kind: string;
+  parameter_id: number;
+  changed_fields: string[];
+}
+
+export interface VideoNaluEvidence {
+  nalu_number: number;
+  nalu_type: number;
+  type_name: string;
+  complete: boolean;
+  access_unit_number: number | null;
+  rtp_timestamp: number | null;
+  first_sequence: number | null;
+  last_sequence: number | null;
+  sample_start_offset: number | null;
+  sample_end_offset: number | null;
+  packets: Array<{ packet_number: number; rtp_sequence: number; offset_ms: number }>;
+  packet_associations_truncated: boolean;
+}
+
+export interface VideoDeepAnalysis {
+  codec: string;
+  status: "indexed" | "partial" | "unavailable" | string;
+  indexed_frames: number;
+  coverage_start_ms: number | null;
+  coverage_end_ms: number | null;
+  coverage_complete: boolean;
+  coverage_reason: string | null;
+  frames: VideoFrameIndex[];
+  capabilities: Array<{
+    id: string;
+    label: string;
+    status: "available" | "unavailable" | string;
+    reason: string | null;
+  }>;
+  limitations: string[];
+}
+
+export interface VideoFrameIndex {
+  display_index: number;
+  decode_index: number | null;
+  decode_index_precision: string;
+  pts_ms: number | null;
+  dts_ms: number | null;
+  duration_ms: number | null;
+  packet_position: number | null;
+  packet_size: number | null;
+  picture_type: string | null;
+  key_frame: boolean;
+  interlaced: boolean | null;
+  top_field_first: boolean | null;
+}
+
+export interface VideoWorkerFrame {
+  display_index: number;
+  pts: number;
+  best_effort_timestamp: number;
+  time_base_num: number;
+  time_base_den: number;
+  width: number;
+  height: number;
+  key_frame: boolean;
+  picture_type: string;
+  interlaced: boolean;
+  analyzer_version: string | null;
+  qp: {
+    base: number;
+    blocks: Array<{
+      x: number;
+      y: number;
+      width: number;
+      height: number;
+      delta: number;
+      value: number;
+    }>;
+  } | null;
+  motion_vectors: Array<{
+    source_direction: number;
+    width: number;
+    height: number;
+    source_x: number;
+    source_y: number;
+    destination_x: number;
+    destination_y: number;
+    motion_x: number;
+    motion_y: number;
+    motion_scale: number;
+    flags: number;
+  }>;
+  block_observations: Array<{
+    x: number;
+    y: number;
+    width: number;
+    height: number;
+    block_level: "h264_macroblock" | "hevc_min_cb_qp" | "hevc_min_pu_sample" | string;
+    type_flags: number;
+    prediction_flags: number;
+    qp: number | null;
+    partition_mode?: string | null;
+    sub_partition_modes?: Array<string | null>;
+    prediction_mode?: string | null;
+    tree_depth?: number | null;
+    transform_flags?: number | null;
+    ref_index_l0: number[];
+    ref_index_l1: number[];
+    reference_poc_l0: Array<number | null>;
+    reference_poc_l1: Array<number | null>;
+    motion_l0_x: number | null;
+    motion_l0_y: number | null;
+    motion_l1_x: number | null;
+    motion_l1_y: number | null;
+  }>;
+}
+
+export interface VideoReferenceComparison {
+  reference_name: string;
+  psnr_average_db: number | null;
+  psnr_identical: boolean;
+  ssim_all: number;
+  vmaf_mean: number | null;
+  compared_frames: number;
+  compared_duration_ms: number | null;
+  source_width: number | null;
+  source_height: number | null;
+  reference_width: number | null;
+  reference_height: number | null;
+  source_pixel_format: string | null;
+  reference_pixel_format: string | null;
+  comparison_pixel_format: string;
+  source_frame_rate: string | null;
+  reference_frame_rate: string | null;
+  alignment_method: string;
+  detected_offset_ms: number;
+  alignment_confidence_percent: number;
+  alignment_error_milli: number | null;
+  coverage_basis: string;
+  method: string;
+  limitations: string[];
+}
+
+export interface VideoSyntaxDocument {
+  codec: string;
+  display_index: number;
+  access_unit_index: number | null;
+  mapping_precision: string;
+  nalus: Array<{
+    index: number;
+    offset: number;
+    size: number;
+    nalu_type: number;
+    type_name: string;
+    fields: Array<{ name: string; value: string; source: string }>;
+    hex: string;
+    hex_truncated: boolean;
+    complete: boolean | null;
+    access_unit_number: number | null;
+    packets: Array<{ packet_number: number; rtp_sequence: number; offset_ms: number }>;
+  }>;
+  limitations: string[];
 }
 
 export interface DiagnosticFinding {

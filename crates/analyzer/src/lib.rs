@@ -1,5 +1,6 @@
 use chrono::Utc;
 use serde::Serialize;
+use std::io::{BufRead, BufReader};
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 use streamscope_audio::{
@@ -9,19 +10,22 @@ use streamscope_audio::{
 use streamscope_capture::{CapturedStream, analyze_capture_file_with_progress};
 use streamscope_core::{
     AnalysisRequest, AnalysisResult, AnalysisStatus, AudioTrackResult, AvSyncAnalysis, DataQuality,
-    ModuleTimings, RESULT_SCHEMA_VERSION, SourceKind, Transport, UrlSafetyError, VideoStreamInfo,
-    redact_rtsp_url, redact_text, validate_rtsp_url,
+    DiagnosticEvidence, DiagnosticFinding, DiagnosticSeverity, ModuleTimings,
+    RESULT_SCHEMA_VERSION, SourceKind, Transport, UrlSafetyError, VideoRecoveryWindow,
+    VideoStreamInfo, redact_rtsp_url, redact_text, validate_rtsp_url,
 };
 use streamscope_diagnostics::{build_timeline, evaluate};
 use streamscope_ffmpeg::{
     check_tool, create_analysis_audio, create_analysis_audio_with_input, create_preview_audio,
     create_preview_audio_with_input, create_preview_video, decode_file, measure_audio_loudness,
-    measure_content_av_sync, probe_file,
+    measure_content_av_sync, probe_file, probe_video_frames,
 };
-use streamscope_h264::{Depacketizer, RtpPayload, analyze_annex_b, analyze_nalus};
+use streamscope_h264::{
+    Depacketizer, Nalu as H264Nalu, RtpPayload, analyze_nalu_results, analyze_nalus,
+};
 use streamscope_h265::{
-    Depacketizer as H265Depacketizer, RtpPayload as H265RtpPayload,
-    analyze_annex_b as analyze_h265_annex_b, analyze_nalus as analyze_h265_nalus,
+    Depacketizer as H265Depacketizer, Nalu as H265Nalu, RtpPayload as H265RtpPayload,
+    analyze_nalu_results as analyze_h265_nalu_results, analyze_nalus as analyze_h265_nalus,
 };
 use streamscope_report::{ReportError, write_reports};
 use streamscope_rtsp::{CapturedMediaTrack, RtspClientOptions, analyze_rtsp_capture_with_progress};
@@ -116,6 +120,8 @@ pub struct ComparisonRun {
 
 #[derive(Debug, thiserror::Error)]
 pub enum AnalyzerError {
+    #[error("分析任务已由用户取消")]
+    Cancelled,
     #[error(transparent)]
     InvalidUrl(#[from] UrlSafetyError),
     #[error("分析时长必须在 1 到 86400 秒之间")]
@@ -128,10 +134,92 @@ pub enum AnalyzerError {
     InputIo(#[from] std::io::Error),
     #[error("输入文件不能为空")]
     EmptyInput,
-    #[error("输入文件超过 512 MiB 限制")]
-    InputTooLarge,
     #[error("无法序列化对比报告: {0}")]
     Json(#[from] serde_json::Error),
+}
+
+struct AnnexBNalus<R> {
+    reader: R,
+    current: Vec<u8>,
+    pending_zeros: usize,
+    started: bool,
+    finished: bool,
+}
+
+impl<R: BufRead> AnnexBNalus<R> {
+    fn new(reader: R) -> Self {
+        Self {
+            reader,
+            current: Vec::new(),
+            pending_zeros: 0,
+            started: false,
+            finished: false,
+        }
+    }
+}
+
+impl<R: BufRead> Iterator for AnnexBNalus<R> {
+    type Item = std::io::Result<Vec<u8>>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        if self.finished {
+            return None;
+        }
+        loop {
+            if streamscope_core::analysis_cancellation_requested() {
+                self.finished = true;
+                return Some(Err(std::io::Error::new(
+                    std::io::ErrorKind::Interrupted,
+                    "analysis cancelled",
+                )));
+            }
+            let buffer = match self.reader.fill_buf() {
+                Ok(buffer) => buffer,
+                Err(error) => {
+                    self.finished = true;
+                    return Some(Err(error));
+                }
+            };
+            if buffer.is_empty() {
+                self.finished = true;
+                if self.started {
+                    self.current
+                        .extend(std::iter::repeat_n(0, self.pending_zeros));
+                }
+                self.pending_zeros = 0;
+                return (!self.current.is_empty()).then(|| Ok(std::mem::take(&mut self.current)));
+            }
+
+            let mut consumed = 0;
+            let mut completed = None;
+            for &byte in buffer {
+                consumed += 1;
+                if byte == 0 {
+                    self.pending_zeros += 1;
+                    continue;
+                }
+                if byte == 1 && self.pending_zeros >= 2 {
+                    self.pending_zeros = 0;
+                    if self.started && !self.current.is_empty() {
+                        completed = Some(std::mem::take(&mut self.current));
+                        break;
+                    }
+                    self.started = true;
+                    continue;
+                }
+                if self.started {
+                    self.current
+                        .extend(std::iter::repeat_n(0, self.pending_zeros));
+                    self.current.push(byte);
+                }
+                self.pending_zeros = 0;
+            }
+            self.reader.consume(consumed);
+            if let Some(nalu) = completed {
+                return Some(Ok(nalu));
+            }
+        }
+    }
 }
 
 pub fn compare_rtsp(options: AnalyzeOptions) -> Result<ComparisonRun, AnalyzerError> {
@@ -238,17 +326,26 @@ fn escape_html(value: &str) -> String {
 }
 
 pub fn analyze_h264_file(options: H264FileOptions) -> Result<AnalysisRun, AnalyzerError> {
+    ensure_not_cancelled()?;
     let metadata = std::fs::metadata(&options.input)?;
     if metadata.len() == 0 {
         return Err(AnalyzerError::EmptyInput);
     }
-    if metadata.len() > 512 * 1024 * 1024 {
-        return Err(AnalyzerError::InputTooLarge);
-    }
-    let bytes = std::fs::read(&options.input)?;
     let analysis_started = Instant::now();
-    let h264 = analyze_annex_b(&bytes);
+    let input = BufReader::with_capacity(64 * 1024, std::fs::File::open(&options.input)?);
+    let nalus = AnnexBNalus::new(input).map(|data| {
+        data.map(|data| H264Nalu {
+            data,
+            timestamp: None,
+            start_sequence: None,
+            end_sequence: None,
+            complete: true,
+            marker: false,
+        })
+    });
+    let mut h264 = analyze_nalu_results(nalus, Vec::new()).map_err(map_stream_error)?;
     let h264_analysis_ms = elapsed_ms(analysis_started);
+    ensure_not_cancelled()?;
     let ffmpeg = check_tool("ffmpeg");
     let ffprobe = check_tool("ffprobe");
     let tools = vec![ffmpeg.clone(), ffprobe.clone()];
@@ -267,7 +364,14 @@ pub fn analyze_h264_file(options: H264FileOptions) -> Result<AnalysisRun, Analyz
         errors.push("未找到 ffprobe，已跳过文件信息探测".into());
         (None, None)
     };
+    if ffprobe.available {
+        match probe_video_frames(&options.input, "h264", timeout) {
+            Ok(deep_analysis) => h264.deep_analysis = Some(deep_analysis),
+            Err(error) => errors.push(format!("逐帧索引失败：{error}")),
+        }
+    }
     let ffprobe_ms = ffprobe.available.then(|| elapsed_ms(probe_started));
+    ensure_not_cancelled()?;
     let decode_started = Instant::now();
     let decode = if ffmpeg.available {
         match decode_file(&options.input, timeout) {
@@ -282,6 +386,7 @@ pub fn analyze_h264_file(options: H264FileOptions) -> Result<AnalysisRun, Analyz
         None
     };
     let ffmpeg_decode_ms = ffmpeg.available.then(|| elapsed_ms(decode_started));
+    ensure_not_cancelled()?;
     let status = if h264.nalu_count > 0 && decode.as_ref().is_some_and(|value| value.success) {
         AnalysisStatus::Completed
     } else if h264.nalu_count > 0 {
@@ -341,23 +446,33 @@ pub fn analyze_h264_file(options: H264FileOptions) -> Result<AnalysisRun, Analyz
             result.protocol.as_ref(),
         );
     }
+    enrich_video_recovery(&mut result);
     result.diagnostics = evaluate(&result);
     result.timeline = build_timeline(&result);
     finish_reports(options.output_root, result)
 }
 
 pub fn analyze_h265_file(options: H265FileOptions) -> Result<AnalysisRun, AnalyzerError> {
+    ensure_not_cancelled()?;
     let metadata = std::fs::metadata(&options.input)?;
     if metadata.len() == 0 {
         return Err(AnalyzerError::EmptyInput);
     }
-    if metadata.len() > 512 * 1024 * 1024 {
-        return Err(AnalyzerError::InputTooLarge);
-    }
-    let bytes = std::fs::read(&options.input)?;
     let analysis_started = Instant::now();
-    let h265 = analyze_h265_annex_b(&bytes);
+    let input = BufReader::with_capacity(64 * 1024, std::fs::File::open(&options.input)?);
+    let nalus = AnnexBNalus::new(input).map(|data| {
+        data.map(|data| H265Nalu {
+            data,
+            timestamp: None,
+            start_sequence: None,
+            end_sequence: None,
+            complete: true,
+            marker: false,
+        })
+    });
+    let mut h265 = analyze_h265_nalu_results(nalus, Vec::new()).map_err(map_stream_error)?;
     let h265_analysis_ms = elapsed_ms(analysis_started);
+    ensure_not_cancelled()?;
     let ffmpeg = check_tool("ffmpeg");
     let ffprobe = check_tool("ffprobe");
     let tools = vec![ffmpeg.clone(), ffprobe.clone()];
@@ -376,7 +491,14 @@ pub fn analyze_h265_file(options: H265FileOptions) -> Result<AnalysisRun, Analyz
         errors.push("未找到 ffprobe，已跳过 H.265 文件信息探测".into());
         (None, None)
     };
+    if ffprobe.available {
+        match probe_video_frames(&options.input, "h265", timeout) {
+            Ok(deep_analysis) => h265.deep_analysis = Some(deep_analysis),
+            Err(error) => errors.push(format!("H.265 逐帧索引失败：{error}")),
+        }
+    }
     let ffprobe_ms = ffprobe.available.then(|| elapsed_ms(probe_started));
+    ensure_not_cancelled()?;
     let mut stream = probed_stream.or_else(|| stream_from_h265(&h265));
     let decode_started = Instant::now();
     let decode = if ffmpeg.available {
@@ -392,6 +514,7 @@ pub fn analyze_h265_file(options: H265FileOptions) -> Result<AnalysisRun, Analyz
         None
     };
     let ffmpeg_decode_ms = ffmpeg.available.then(|| elapsed_ms(decode_started));
+    ensure_not_cancelled()?;
     let status = if h265.nalu_count > 0 && decode.as_ref().is_some_and(|value| value.success) {
         AnalysisStatus::Completed
     } else if h265.nalu_count > 0 {
@@ -446,20 +569,20 @@ pub fn analyze_h265_file(options: H265FileOptions) -> Result<AnalysisRun, Analyz
         capture_stream: None,
         streams: Vec::new(),
     };
+    enrich_video_recovery(&mut result);
     result.diagnostics = evaluate(&result);
     result.timeline = build_timeline(&result);
     finish_reports(options.output_root, result)
 }
 
 pub fn analyze_audio_file(options: AudioFileOptions) -> Result<AnalysisRun, AnalyzerError> {
+    ensure_not_cancelled()?;
     let metadata = std::fs::metadata(&options.input)?;
     if metadata.len() == 0 {
         return Err(AnalyzerError::EmptyInput);
     }
-    if metadata.len() > 512 * 1024 * 1024 {
-        return Err(AnalyzerError::InputTooLarge);
-    }
     let canonical = options.input.canonicalize()?;
+    ensure_not_cancelled()?;
     let display_name = canonical
         .file_name()
         .and_then(|name| name.to_str())
@@ -506,6 +629,7 @@ pub fn analyze_audio_file(options: AudioFileOptions) -> Result<AnalysisRun, Anal
         None
     };
     let ffmpeg_decode_ms = ffmpeg.available.then(|| elapsed_ms(decode_started));
+    ensure_not_cancelled()?;
     let mut data_quality = DataQuality {
         assessed: true,
         sufficient_for_diagnosis: audio.conclusion_reliable,
@@ -565,6 +689,7 @@ pub fn analyze_audio_file(options: AudioFileOptions) -> Result<AnalysisRun, Anal
         .audio
         .as_ref()
         .and_then(|audio| audio.decoded_duration_ms);
+    enrich_video_recovery(&mut result);
     result.diagnostics = evaluate(&result);
     result.timeline = build_timeline(&result);
     finish_reports_in(report_directory, result)
@@ -668,6 +793,7 @@ pub fn analyze_pcap_file_with_progress(
     options: PcapFileOptions,
     mut progress: impl FnMut(AnalysisProgress),
 ) -> Result<AnalysisRun, AnalyzerError> {
+    ensure_not_cancelled()?;
     let canonical = options.input.canonicalize()?;
     let display_name = canonical
         .file_name()
@@ -678,23 +804,41 @@ pub fn analyze_pcap_file_with_progress(
     std::fs::create_dir_all(&report_directory)?;
     let started = Instant::now();
     emit_progress(&mut progress, 5, "抓包", "正在发现媒体流并执行逐流统计");
-    let capture =
-        analyze_capture_file_with_progress(&canonical, &report_directory, |percent, detail| {
+    let capture = match analyze_capture_file_with_progress(
+        &canonical,
+        &report_directory,
+        |percent, detail| {
             emit_progress(&mut progress, 5 + percent.min(100) / 2, "分流", detail);
-        })
-        .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error.to_string()))?;
+        },
+    ) {
+        Ok(capture) => capture,
+        Err(_) if streamscope_core::analysis_cancellation_requested() => {
+            return Err(AnalyzerError::Cancelled);
+        }
+        Err(error) => {
+            return Err(AnalyzerError::InputIo(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                error.to_string(),
+            )));
+        }
+    };
     let tools = if options.stream_ids.is_empty() {
         Vec::new()
     } else {
         vec![check_tool("ffmpeg"), check_tool("ffprobe")]
     };
-    let count = capture.streams.len();
+    let capture_summary = capture.summary;
+    let capture_protocol = capture.protocol;
+    let capture_session_sdp = capture.session_sdp;
+    let captured_streams = capture.streams;
+    let count = captured_streams.len();
     let mut streams = Vec::with_capacity(count);
-    for (index, mut captured) in capture.streams.into_iter().enumerate() {
-        if capture.summary.malformed_frames > 0 {
+    for (index, mut captured) in captured_streams.into_iter().enumerate() {
+        ensure_not_cancelled()?;
+        if capture_summary.malformed_frames > 0 {
             captured.warnings.push(format!(
                 "原抓包存在 {} 个无法完整解析的网络帧，不能排除本流证据受捕获缺失影响",
-                capture.summary.malformed_frames
+                capture_summary.malformed_frames
             ));
         }
         let selected = options
@@ -726,7 +870,7 @@ pub fn analyze_pcap_file_with_progress(
             selected,
         ));
     }
-    let status = if streams.is_empty() {
+    let mut status = if streams.is_empty() {
         AnalysisStatus::Failed
     } else if streams
         .iter()
@@ -736,7 +880,7 @@ pub fn analyze_pcap_file_with_progress(
     } else {
         AnalysisStatus::Partial
     };
-    let mut errors = capture.summary.warnings.clone();
+    let mut errors = capture_summary.warnings.clone();
     for id in options.stream_ids.iter().filter(|id| id.as_str() != "*") {
         if !streams.iter().any(|stream| {
             stream
@@ -752,6 +896,9 @@ pub fn analyze_pcap_file_with_progress(
     if streams.is_empty() {
         errors.push("未发现可分析的 RTP 流，请检查抓包协议、完整性及支持范围".into());
     }
+    if capture_requires_partial(&errors) {
+        status = AnalysisStatus::Partial;
+    }
     let mut av_sync = build_av_sync_pairs(&streams);
     enrich_pcap_content_sync(
         &mut av_sync,
@@ -759,7 +906,7 @@ pub fn analyze_pcap_file_with_progress(
         Duration::from_secs(options.process_timeout_seconds.clamp(1, 3_600)),
         &mut errors,
     );
-    let result = AnalysisResult {
+    let mut result = AnalysisResult {
         schema_version: RESULT_SCHEMA_VERSION.into(),
         generated_at: Utc::now().to_rfc3339(),
         request: AnalysisRequest {
@@ -772,8 +919,8 @@ pub fn analyze_pcap_file_with_progress(
         tools,
         stream: None,
         format_bit_rate: None,
-        session_sdp: None,
-        protocol: None,
+        session_sdp: capture_session_sdp,
+        protocol: capture_protocol,
         h264: None,
         h265: None,
         audio: None,
@@ -791,14 +938,89 @@ pub fn analyze_pcap_file_with_progress(
         preview_audio: None,
         status,
         errors,
-        capture_summary: Some(capture.summary),
+        capture_summary: Some(capture_summary),
         capture_stream: None,
         streams,
     };
+    result.diagnostics = capture_control_findings(&result.errors);
+    result.timeline = build_timeline(&result);
     emit_progress(&mut progress, 95, "报告", "正在写入总览和各流独立报告");
     let run = finish_reports_in(report_directory, result)?;
     emit_progress(&mut progress, 100, "完成", "多流抓包报告已生成");
     Ok(run)
+}
+
+fn capture_requires_partial(errors: &[String]) -> bool {
+    errors.iter().any(|error| {
+        error.starts_with("RTSP PLAY ")
+            || (error.starts_with("RTSP SETUP 已协商 ") && error.contains("未见该媒体 RTP"))
+    })
+}
+
+fn capture_control_findings(errors: &[String]) -> Vec<DiagnosticFinding> {
+    let mut findings = Vec::new();
+    for error in errors {
+        if error.starts_with("RTSP PLAY ") {
+            findings.push(DiagnosticFinding {
+                rule_id: "RTSP-PCAP-001".into(),
+                title: "RTSP PLAY 过程异常".into(),
+                category: "RTSP".into(),
+                severity: DiagnosticSeverity::High,
+                confidence_percent: 98,
+                conclusion: error.clone(),
+                evidence: vec![DiagnosticEvidence {
+                    label: "请求/响应配对".into(),
+                    value: error.clone(),
+                }],
+                impact: "播放启动没有形成稳定成功状态，媒体服务器可能不会持续发送对应 RTP。".into(),
+                suggestions: vec![
+                    "逐项核对失败 PLAY 的 Request-URI、Session、Range 和鉴权字段，并检查设备 RTSP 日志。".into(),
+                ],
+                verification: vec![
+                    "重新抓取从 DESCRIBE 到首个媒体包的完整会话，确认每个 PLAY 均有唯一且成功的响应。".into(),
+                ],
+            });
+        }
+        if error.starts_with("RTSP SETUP 已协商 ") && error.contains("未见该媒体 RTP") {
+            let video = error.contains(" video ");
+            findings.push(DiagnosticFinding {
+                rule_id: if video {
+                    "RTP-PCAP-VIDEO-002"
+                } else {
+                    "RTP-PCAP-MEDIA-002"
+                }
+                .into(),
+                title: if video {
+                    "视频轨道已协商但没有视频 RTP"
+                } else {
+                    "媒体轨道已协商但没有对应 RTP"
+                }
+                .into(),
+                category: "跨层关联".into(),
+                severity: DiagnosticSeverity::High,
+                confidence_percent: 98,
+                conclusion: error.clone(),
+                evidence: vec![DiagnosticEvidence {
+                    label: "SETUP 与数据面".into(),
+                    value: error.clone(),
+                }],
+                impact: if video {
+                    "客户端无法获得视频帧，表现为黑屏；这不是可由解码器恢复的普通花屏。"
+                } else {
+                    "已协商的媒体轨道没有形成可播放数据。"
+                }
+                .into(),
+                suggestions: vec![
+                    "检查 PLAY 响应、设备发送端口、交换机/防火墙策略以及抓包点是否覆盖协商端口。"
+                        .into(),
+                ],
+                verification: vec![
+                    "按报告中的服务端和客户端端口过滤抓包，确认是否出现该轨道的 RTP 序列。".into(),
+                ],
+            });
+        }
+    }
+    findings
 }
 
 fn analyze_captured_stream(
@@ -839,6 +1061,22 @@ fn analyze_captured_stream(
                 match probe_file(sample, timeout) {
                     Ok(probe) => stream = Some(probe.stream),
                     Err(error) => errors.push(format!("本流样本探测失败：{error}")),
+                }
+                let codec = if captured.h265.is_some() {
+                    "h265"
+                } else {
+                    "h264"
+                };
+                match probe_video_frames(sample, codec, timeout) {
+                    Ok(deep_analysis) => {
+                        if let Some(analysis) = &mut captured.h264 {
+                            analysis.deep_analysis = Some(deep_analysis.clone());
+                        }
+                        if let Some(analysis) = &mut captured.h265 {
+                            analysis.deep_analysis = Some(deep_analysis);
+                        }
+                    }
+                    Err(error) => errors.push(format!("本流逐帧索引失败：{error}")),
                 }
                 timings.ffprobe_ms = Some(elapsed_ms(started));
             } else {
@@ -1041,6 +1279,7 @@ fn analyze_captured_stream(
         capture_stream: Some(identity),
         streams: Vec::new(),
     };
+    enrich_video_recovery(&mut result);
     result.diagnostics = evaluate(&result);
     result.timeline = build_timeline(&result);
     result
@@ -1054,6 +1293,7 @@ pub fn analyze_rtsp_with_progress(
     options: AnalyzeOptions,
     mut progress: impl FnMut(AnalysisProgress),
 ) -> Result<AnalysisRun, AnalyzerError> {
+    ensure_not_cancelled()?;
     validate_options(&options)?;
     let report_directory = new_report_directory(&options.output_root);
     std::fs::create_dir_all(&report_directory)?;
@@ -1076,8 +1316,8 @@ pub fn analyze_rtsp_with_progress(
     let rtsp_started = Instant::now();
     let (
         protocol,
-        h264,
-        h265,
+        mut h264,
+        mut h265,
         audio,
         audio_tracks,
         mut av_sync,
@@ -1279,6 +1519,9 @@ pub fn analyze_rtsp_with_progress(
             }
         }
         Err(error) => {
+            if streamscope_core::analysis_cancellation_requested() {
+                return Err(AnalyzerError::Cancelled);
+            }
             timings.rtsp_session_ms = Some(elapsed_ms(rtsp_started));
             errors.push(format!("RTSP 协议探测失败：{error}"));
             (
@@ -1296,6 +1539,7 @@ pub fn analyze_rtsp_with_progress(
             )
         }
     };
+    ensure_not_cancelled()?;
     emit_progress(&mut progress, 35, "协议", "RTSP/RTP 视频采样完成");
 
     let sample_path = report_directory.join(format!("sample.{sample_extension}"));
@@ -1303,8 +1547,22 @@ pub fn analyze_rtsp_with_progress(
         std::fs::write(&sample_path, &sample)?;
     }
 
-    emit_progress(&mut progress, 40, "探测", "正在探测同次 RTP 采样生成的码流");
     let probe_started = Instant::now();
+    if ffprobe.available && sample_path.is_file() {
+        match probe_video_frames(&sample_path, sample_extension, process_timeout) {
+            Ok(deep_analysis) => {
+                if let Some(analysis) = &mut h264 {
+                    analysis.deep_analysis = Some(deep_analysis.clone());
+                }
+                if let Some(analysis) = &mut h265 {
+                    analysis.deep_analysis = Some(deep_analysis);
+                }
+            }
+            Err(error) => errors.push(format!("实时样本逐帧索引失败：{error}")),
+        }
+    }
+
+    emit_progress(&mut progress, 40, "探测", "正在探测同次 RTP 采样生成的码流");
     let (probed_stream, probed_bit_rate) = if ffprobe.available && sample_path.is_file() {
         match probe_file(&sample_path, process_timeout) {
             Ok(result) => (Some(result.stream), result.format_bit_rate),
@@ -1321,6 +1579,7 @@ pub fn analyze_rtsp_with_progress(
     };
     timings.ffprobe_ms =
         (ffprobe.available && sample_path.is_file()).then(|| elapsed_ms(probe_started));
+    ensure_not_cancelled()?;
     let format_bit_rate = protocol
         .as_ref()
         .and_then(|value| value.rtp.average_bit_rate_bps)
@@ -1381,6 +1640,7 @@ pub fn analyze_rtsp_with_progress(
     }
     timings.ffmpeg_decode_ms =
         (ffmpeg.available && sample_path.is_file()).then(|| elapsed_ms(decode_started));
+    ensure_not_cancelled()?;
     data_quality.decoded_frames = decode.as_ref().and_then(|value| value.decoded_frames);
     if h264.is_none() && h265.is_none() {
         if !audio_tracks.is_empty() {
@@ -1459,6 +1719,7 @@ pub fn analyze_rtsp_with_progress(
         capture_stream: None,
         streams: Vec::new(),
     };
+    enrich_video_recovery(&mut result);
     result.diagnostics = evaluate(&result);
     result.timeline = build_timeline(&result);
     emit_progress(&mut progress, 95, "诊断", "规则评估与时间线关联完成");
@@ -2074,6 +2335,109 @@ fn build_rtsp_sync_pairs(tracks: &[CapturedMediaTrack]) -> Vec<AvSyncAnalysis> {
     pairs
 }
 
+fn recovery_windows_for(
+    frames: &[streamscope_core::H264FrameEvidence],
+    decode: Option<&streamscope_core::DecodeSummary>,
+) -> Vec<VideoRecoveryWindow> {
+    let mut sources = Vec::<(u64, String)>::new();
+    if let Some(decode) = decode {
+        for issue in &decode.issues {
+            if matches!(
+                issue.kind.as_str(),
+                "black_segment" | "freeze_segment" | "visual_corruption_candidate"
+            ) {
+                continue;
+            }
+            for location in &issue.locations {
+                if !sources
+                    .iter()
+                    .any(|(frame, kind)| *frame == location.frame_number && *kind == issue.kind)
+                {
+                    sources.push((location.frame_number, issue.kind.clone()));
+                }
+            }
+        }
+    }
+    for frame in frames.iter().filter(|frame| !frame.complete) {
+        if !sources
+            .iter()
+            .any(|(number, _)| *number == frame.frame_number)
+        {
+            sources.push((frame.frame_number, "incomplete_access_unit".into()));
+        }
+    }
+    sources.sort_by_key(|(frame, _)| *frame);
+    sources
+        .into_iter()
+        .filter_map(|(source_number, source_kind)| {
+            let source = frames
+                .iter()
+                .find(|frame| frame.frame_number == source_number)?;
+            let next = frames
+                .iter()
+                .find(|frame| frame.idr && frame.frame_number > source_number);
+            let wait_frames = next.map(|frame| frame.frame_number.saturating_sub(source_number));
+            let wait_ms = source
+                .first_offset_ms
+                .zip(next.and_then(|frame| frame.first_offset_ms))
+                .map(|(start, end)| end.saturating_sub(start));
+            let post_access_visual_candidate = next.is_some_and(|random_access| {
+                decode.is_some_and(|decode| {
+                    decode.issues.iter().any(|issue| {
+                        matches!(
+                            issue.kind.as_str(),
+                            "black_segment" | "freeze_segment" | "visual_corruption_candidate"
+                        ) && issue.locations.iter().any(|location| {
+                            location.frame_number >= random_access.frame_number
+                                && location.frame_number
+                                    <= random_access.frame_number.saturating_add(30)
+                        })
+                    })
+                })
+            });
+            Some(VideoRecoveryWindow {
+                source_frame: source_number,
+                source_kind,
+                source_offset_ms: source.first_offset_ms,
+                first_packet: source.first_packet,
+                last_packet: source.last_packet,
+                next_random_access_frame: next.map(|frame| frame.frame_number),
+                next_random_access_offset_ms: next.and_then(|frame| frame.first_offset_ms),
+                wait_frames,
+                wait_ms,
+                structural_status: if next.is_some() {
+                    "random_access_observed"
+                } else {
+                    "not_observed_in_coverage"
+                }
+                .into(),
+                visual_status: if post_access_visual_candidate {
+                    "post_access_anomaly_candidate"
+                } else {
+                    "not_confirmed"
+                }
+                .into(),
+                limitations: vec![if post_access_visual_candidate {
+                    "随机接入点后 30 帧内仍有画面异常候选，但启发式扫描不能单独证明错误传播仍在持续。"
+                } else {
+                    "IDR/CRA 仅是结构恢复机会；当前没有逐像素参考真值，不能据此确认画面已经恢复。"
+                }
+                .into()],
+            })
+        })
+        .take(1_000)
+        .collect()
+}
+
+fn enrich_video_recovery(result: &mut AnalysisResult) {
+    if let Some(analysis) = &mut result.h264 {
+        analysis.recovery_windows = recovery_windows_for(&analysis.frames, result.decode.as_ref());
+    }
+    if let Some(analysis) = &mut result.h265 {
+        analysis.recovery_windows = recovery_windows_for(&analysis.frames, result.decode.as_ref());
+    }
+}
+
 fn assess_data_quality(
     quality: &mut DataQuality,
     protocol: Option<&streamscope_core::ProtocolAnalysis>,
@@ -2287,9 +2651,108 @@ fn validate_options(options: &AnalyzeOptions) -> Result<(), AnalyzerError> {
     Ok(())
 }
 
+fn ensure_not_cancelled() -> Result<(), AnalyzerError> {
+    if streamscope_core::analysis_cancellation_requested() {
+        Err(AnalyzerError::Cancelled)
+    } else {
+        Ok(())
+    }
+}
+
+fn map_stream_error(error: std::io::Error) -> AnalyzerError {
+    if error.kind() == std::io::ErrorKind::Interrupted
+        && streamscope_core::analysis_cancellation_requested()
+    {
+        AnalyzerError::Cancelled
+    } else {
+        AnalyzerError::InputIo(error)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn failed_video_play_forces_capture_report_to_partial() {
+        assert!(capture_requires_partial(&[
+            "RTSP PLAY 失败：CSeq 6=400 Bad Request".into(),
+            "RTSP SETUP 已协商 video H264，但抓包中未见该媒体 RTP".into(),
+        ]));
+        assert!(!capture_requires_partial(&[
+            "RTSP 响应头未完整终止；仅保留状态行".into(),
+        ]));
+    }
+
+    #[test]
+    fn annex_b_reader_handles_start_codes_across_small_buffers() {
+        let input = vec![9, 0, 0, 0, 1, 0x67, 1, 0, 0, 1, 0x68, 2, 0, 0];
+        let reader = BufReader::with_capacity(4, std::io::Cursor::new(input));
+        let nalus = AnnexBNalus::new(reader)
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
+        assert_eq!(nalus, vec![vec![0x67, 1], vec![0x68, 2, 0, 0]]);
+    }
+
+    #[test]
+    fn annex_b_reader_yields_large_stream_incrementally() {
+        let mut input = Vec::new();
+        for index in 0..10_000_u32 {
+            input.extend_from_slice(&[0, 0, 1, 0x41]);
+            input.push((index % 250 + 2) as u8);
+        }
+        let reader = BufReader::with_capacity(31, std::io::Cursor::new(input));
+        let mut nalus = AnnexBNalus::new(reader);
+        assert_eq!(nalus.next().unwrap().unwrap(), vec![0x41, 2]);
+        assert_eq!(nalus.count(), 9_999);
+    }
+
+    #[test]
+    fn recovery_window_separates_random_access_from_visual_recovery() {
+        let frame = |number, offset, idr, complete| streamscope_core::H264FrameEvidence {
+            frame_number: number,
+            rtp_timestamp: None,
+            first_sequence: None,
+            last_sequence: None,
+            first_nalu: number,
+            last_nalu: number,
+            first_packet: Some(number * 10),
+            last_packet: Some(number * 10 + 1),
+            first_offset_ms: Some(offset),
+            last_offset_ms: Some(offset),
+            sample_start_offset: None,
+            sample_end_offset: None,
+            idr,
+            complete,
+            boundary_confidence: "test".into(),
+        };
+        let frames = vec![
+            frame(10, 1_000, false, false),
+            frame(20, 1_400, true, true),
+            frame(22, 1_480, false, true),
+        ];
+        let decode = streamscope_core::DecodeSummary {
+            issues: vec![streamscope_core::DecodeIssue {
+                kind: "visual_corruption_candidate".into(),
+                count: 1,
+                example: "stripe".into(),
+                locations: vec![streamscope_core::DecodeIssueLocation {
+                    frame_number: 22,
+                    pts_time: Some("1.480".into()),
+                    precision: "filter_timestamp_nearest_frame".into(),
+                }],
+            }],
+            ..streamscope_core::DecodeSummary::default()
+        };
+        let windows = recovery_windows_for(&frames, Some(&decode));
+        assert_eq!(windows.len(), 1);
+        assert_eq!(windows[0].source_frame, 10);
+        assert_eq!(windows[0].source_kind, "incomplete_access_unit");
+        assert_eq!(windows[0].next_random_access_frame, Some(20));
+        assert_eq!(windows[0].wait_frames, Some(10));
+        assert_eq!(windows[0].wait_ms, Some(400));
+        assert_eq!(windows[0].visual_status, "post_access_anomaly_candidate");
+    }
 
     fn options() -> AnalyzeOptions {
         AnalyzeOptions {

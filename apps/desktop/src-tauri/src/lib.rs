@@ -1,5 +1,6 @@
 use serde::{Deserialize, Serialize};
-use std::path::PathBuf;
+use std::io::{BufRead, BufReader};
+use std::path::{Path, PathBuf};
 use streamscope_analyzer::{
     AnalysisRun, AnalyzeOptions, AudioFileOptions, GeneratedReports, H264FileOptions,
     H265FileOptions, PcapFileOptions,
@@ -42,6 +43,7 @@ async fn analyze_rtsp(
     app: tauri::AppHandle,
     request: AnalyzeCommand,
 ) -> Result<AnalysisRun, String> {
+    streamscope_core::reset_analysis_cancellation();
     let transport = match request.transport.as_str() {
         "tcp" => Transport::Tcp,
         "udp" => Transport::Udp,
@@ -70,6 +72,7 @@ async fn analyze_rtsp(
 
 #[tauri::command]
 async fn analyze_h264_file(app: tauri::AppHandle, path: String) -> Result<AnalysisRun, String> {
+    streamscope_core::reset_analysis_cancellation();
     let output_root = default_report_root(&app)?;
     let progress_app = app.clone();
     let _ = progress_app.emit(
@@ -105,6 +108,7 @@ async fn analyze_h264_file(app: tauri::AppHandle, path: String) -> Result<Analys
 
 #[tauri::command]
 async fn analyze_h265_file(app: tauri::AppHandle, path: String) -> Result<AnalysisRun, String> {
+    streamscope_core::reset_analysis_cancellation();
     let output_root = default_report_root(&app)?;
     let progress_app = app.clone();
     let _ = progress_app.emit(
@@ -140,6 +144,7 @@ async fn analyze_h265_file(app: tauri::AppHandle, path: String) -> Result<Analys
 
 #[tauri::command]
 async fn analyze_audio_file(app: tauri::AppHandle, path: String) -> Result<AnalysisRun, String> {
+    streamscope_core::reset_analysis_cancellation();
     let output_root = default_report_root(&app)?;
     let _ = app.emit(
         "analysis-progress",
@@ -178,6 +183,7 @@ async fn analyze_pcap_file(
     path: String,
     stream_ids: Option<Vec<String>>,
 ) -> Result<AnalysisRun, String> {
+    streamscope_core::reset_analysis_cancellation();
     let output_root = default_report_root(&app)?;
     let _ = app.emit(
         "analysis-progress",
@@ -222,6 +228,7 @@ async fn compare_rtsp(
     app: tauri::AppHandle,
     request: AnalyzeCommand,
 ) -> Result<streamscope_analyzer::ComparisonRun, String> {
+    streamscope_core::reset_analysis_cancellation();
     let output_root = default_report_root(&app)?;
     let _ = app.emit(
         "analysis-progress",
@@ -254,6 +261,11 @@ async fn compare_rtsp(
         },
     );
     Ok(run)
+}
+
+#[tauri::command]
+fn cancel_analysis() {
+    streamscope_core::request_analysis_cancellation();
 }
 
 #[tauri::command]
@@ -329,6 +341,624 @@ async fn export_media(
     })
     .await
     .map_err(|error| format!("导出任务异常结束：{error}"))?
+}
+
+fn resolve_report_video_source(
+    report_root: &Path,
+    report_directory: &str,
+    stream_id: Option<&str>,
+    display_index: u64,
+) -> Result<(PathBuf, PathBuf, AnalysisResult), String> {
+    let root = report_root
+        .canonicalize()
+        .map_err(|error| format!("报告根目录不可用：{error}"))?;
+    let report = PathBuf::from(report_directory)
+        .canonicalize()
+        .map_err(|error| format!("报告目录不可用：{error}"))?;
+    if !report.starts_with(&root) || !report.join("result.json").is_file() {
+        return Err("只能分析 StreamScope 报告中的视频帧".into());
+    }
+    let directory = if let Some(stream_id) = stream_id {
+        if stream_id.is_empty()
+            || !stream_id.chars().all(|character| {
+                character.is_ascii_alphanumeric() || matches!(character, '-' | '_')
+            })
+        {
+            return Err("媒体流 ID 无效".into());
+        }
+        report
+            .join("streams")
+            .join(stream_id)
+            .canonicalize()
+            .map_err(|error| format!("媒体流报告目录不可用：{error}"))?
+    } else {
+        report
+    };
+    if !directory.starts_with(&root) {
+        return Err("媒体流报告目录超出允许范围".into());
+    }
+    let result: AnalysisResult = serde_json::from_slice(
+        &std::fs::read(directory.join("result.json"))
+            .map_err(|error| format!("读取视频报告失败：{error}"))?,
+    )
+    .map_err(|error| format!("视频报告格式无效：{error}"))?;
+    let deep = result
+        .h264
+        .as_ref()
+        .and_then(|analysis| analysis.deep_analysis.as_ref())
+        .or_else(|| {
+            result
+                .h265
+                .as_ref()
+                .and_then(|analysis| analysis.deep_analysis.as_ref())
+        })
+        .ok_or_else(|| "当前报告没有逐帧索引".to_string())?;
+    if !deep
+        .frames
+        .iter()
+        .any(|frame| frame.display_index == display_index)
+    {
+        return Err("所选帧不在已索引范围内".into());
+    }
+    let sample_h264 = directory.join("sample.h264");
+    let sample_h265 = directory.join("sample.h265");
+    let source = if sample_h264.is_file() {
+        sample_h264
+    } else if sample_h265.is_file() {
+        sample_h265
+    } else if matches!(
+        result.request.source_kind,
+        streamscope_core::SourceKind::H264 | streamscope_core::SourceKind::H265
+    ) {
+        result
+            .request
+            .source_path
+            .as_deref()
+            .map(PathBuf::from)
+            .filter(|path| path.is_file())
+            .ok_or_else(|| "原视频文件已移动或不可用".to_string())?
+    } else {
+        return Err("当前报告没有可用于逐帧分析的视频样本".into());
+    };
+    Ok((directory, source, result))
+}
+
+#[tauri::command]
+async fn extract_video_frame(
+    app: tauri::AppHandle,
+    report_directory: String,
+    stream_id: Option<String>,
+    display_index: u64,
+) -> Result<String, String> {
+    let report_root = default_report_root(&app)?;
+    tauri::async_runtime::spawn_blocking(move || {
+        let (directory, source, _) = resolve_report_video_source(
+            &report_root,
+            &report_directory,
+            stream_id.as_deref(),
+            display_index,
+        )?;
+        let frames = directory.join("frames");
+        std::fs::create_dir_all(&frames).map_err(|error| format!("创建帧图像目录失败：{error}"))?;
+        let destination = frames.join(format!("frame-{display_index}.png"));
+        if !destination.is_file() {
+            streamscope_ffmpeg::extract_video_frame(
+                &source,
+                &destination,
+                display_index,
+                std::time::Duration::from_secs(60),
+            )
+            .map_err(|error| error.to_string())?;
+        }
+        Ok(destination.display().to_string())
+    })
+    .await
+    .map_err(|error| format!("逐帧图像任务异常结束：{error}"))?
+}
+
+#[tauri::command]
+async fn compare_video_reference(
+    app: tauri::AppHandle,
+    report_directory: String,
+    stream_id: Option<String>,
+    reference_path: String,
+) -> Result<streamscope_ffmpeg::VideoReferenceComparison, String> {
+    let report_root = default_report_root(&app)?;
+    tauri::async_runtime::spawn_blocking(move || {
+        let (directory, source, _) =
+            resolve_report_video_source(&report_root, &report_directory, stream_id.as_deref(), 0)?;
+        let reference = PathBuf::from(reference_path);
+        if !reference.is_absolute() || !reference.is_file() {
+            return Err("请选择存在的参考视频文件".into());
+        }
+        let extension = reference
+            .extension()
+            .and_then(|value| value.to_str())
+            .map(str::to_ascii_lowercase)
+            .ok_or_else(|| "参考视频缺少可识别的扩展名".to_string())?;
+        if !matches!(
+            extension.as_str(),
+            "h264"
+                | "264"
+                | "h265"
+                | "265"
+                | "hevc"
+                | "mp4"
+                | "mkv"
+                | "mov"
+                | "avi"
+                | "ts"
+                | "m2ts"
+                | "webm"
+        ) {
+            return Err(format!("暂不支持 .{extension} 参考视频"));
+        }
+        let mut comparison = streamscope_ffmpeg::compare_video_reference(
+            &source,
+            &reference,
+            std::time::Duration::from_secs(300),
+        )
+        .map_err(|error| error.to_string())?;
+        let difference = directory.join("video-reference-difference.mp4");
+        if difference.exists() {
+            std::fs::remove_file(&difference)
+                .map_err(|error| format!("清理旧参考视频差异预览失败：{error}"))?;
+        }
+        match streamscope_ffmpeg::create_video_reference_difference_preview(
+            &source,
+            &reference,
+            &difference,
+            std::time::Duration::from_secs(300),
+        ) {
+            Ok(()) => comparison.limitations.push(
+                "差异预览将像素差绝对值做 4 倍对比度增强并增加少量亮度，仅用于定位，不参与 PSNR/SSIM/VMAF 数值计算；最长保存前 60 秒。"
+                    .into(),
+            ),
+            Err(_) => comparison
+                .limitations
+                .push("差异增强预览生成失败；质量指标结果仍有效。".into()),
+        }
+        let destination = directory.join("video-reference-comparison.json");
+        let temporary = directory.join(format!(
+            "video-reference-comparison-{}.tmp",
+            std::process::id()
+        ));
+        let json = serde_json::to_vec_pretty(&comparison)
+            .map_err(|error| format!("序列化参考视频对比结果失败：{error}"))?;
+        std::fs::write(&temporary, json)
+            .map_err(|error| format!("写入参考视频对比结果失败：{error}"))?;
+        if destination.exists() {
+            std::fs::remove_file(&destination)
+                .map_err(|error| format!("覆盖旧参考视频对比结果失败：{error}"))?;
+        }
+        std::fs::rename(&temporary, &destination).map_err(|error| {
+            let _ = std::fs::remove_file(&temporary);
+            format!("保存参考视频对比结果失败：{error}")
+        })?;
+        Ok(comparison)
+    })
+    .await
+    .map_err(|error| format!("参考视频对比任务异常结束：{error}"))?
+}
+
+#[tauri::command]
+async fn load_video_reference_comparison(
+    app: tauri::AppHandle,
+    report_directory: String,
+    stream_id: Option<String>,
+) -> Result<Option<streamscope_ffmpeg::VideoReferenceComparison>, String> {
+    let report_root = default_report_root(&app)?;
+    tauri::async_runtime::spawn_blocking(move || {
+        let (directory, _, _) =
+            resolve_report_video_source(&report_root, &report_directory, stream_id.as_deref(), 0)?;
+        let path = directory.join("video-reference-comparison.json");
+        if !path.is_file() {
+            return Ok(None);
+        }
+        let comparison = serde_json::from_slice(
+            &std::fs::read(path).map_err(|error| format!("读取参考视频对比结果失败：{error}"))?,
+        )
+        .map_err(|error| format!("参考视频对比结果格式无效：{error}"))?;
+        Ok(Some(comparison))
+    })
+    .await
+    .map_err(|error| format!("读取参考视频对比结果任务异常结束：{error}"))?
+}
+
+#[tauri::command]
+async fn load_video_reference_difference(
+    app: tauri::AppHandle,
+    report_directory: String,
+    stream_id: Option<String>,
+) -> Result<Option<String>, String> {
+    let report_root = default_report_root(&app)?;
+    tauri::async_runtime::spawn_blocking(move || {
+        let (directory, _, _) =
+            resolve_report_video_source(&report_root, &report_directory, stream_id.as_deref(), 0)?;
+        let path = directory.join("video-reference-difference.mp4");
+        Ok(path.is_file().then(|| path.display().to_string()))
+    })
+    .await
+    .map_err(|error| format!("读取参考视频差异预览任务异常结束：{error}"))?
+}
+
+#[tauri::command]
+async fn analyze_video_frame_blocks(
+    app: tauri::AppHandle,
+    report_directory: String,
+    stream_id: Option<String>,
+    display_index: u64,
+) -> Result<streamscope_ffmpeg::VideoWorkerFrame, String> {
+    let report_root = default_report_root(&app)?;
+    tauri::async_runtime::spawn_blocking(move || {
+        let (directory, source, _) = resolve_report_video_source(
+            &report_root,
+            &report_directory,
+            stream_id.as_deref(),
+            display_index,
+        )?;
+        let frames = directory.join("frames");
+        std::fs::create_dir_all(&frames).map_err(|error| format!("创建块数据目录失败：{error}"))?;
+        let output = frames.join(format!("blocks-{display_index}.json"));
+        streamscope_ffmpeg::analyze_video_frame_blocks(
+            &source,
+            &output,
+            display_index,
+            std::time::Duration::from_secs(120),
+        )
+        .map_err(|error| error.to_string())
+    })
+    .await
+    .map_err(|error| format!("视频块分析任务异常结束：{error}"))?
+}
+
+fn read_annex_b_nalu_range(
+    source: &Path,
+    first_nalu: u64,
+    last_nalu: u64,
+) -> std::io::Result<Vec<(u64, u64, Vec<u8>)>> {
+    let mut reader = BufReader::with_capacity(64 * 1024, std::fs::File::open(source)?);
+    let mut selected = Vec::new();
+    let mut current = Vec::new();
+    let mut pending_zeros = 0_usize;
+    let mut active_index = 0_u64;
+    let mut active_offset = 0_u64;
+    let mut absolute = 0_u64;
+
+    loop {
+        let buffer = reader.fill_buf()?;
+        if buffer.is_empty() {
+            if (first_nalu..=last_nalu).contains(&active_index) {
+                current.extend(std::iter::repeat_n(0, pending_zeros));
+                if !current.is_empty() {
+                    selected.push((active_index, active_offset, current));
+                }
+            }
+            return Ok(selected);
+        }
+        let mut consumed = 0_usize;
+        let mut complete = false;
+        for &byte in buffer {
+            let position = absolute + consumed as u64;
+            consumed += 1;
+            if byte == 0 {
+                pending_zeros += 1;
+                continue;
+            }
+            if byte == 1 && pending_zeros >= 2 {
+                if (first_nalu..=last_nalu).contains(&active_index) && !current.is_empty() {
+                    selected.push((active_index, active_offset, std::mem::take(&mut current)));
+                } else {
+                    current.clear();
+                }
+                if active_index >= last_nalu {
+                    complete = true;
+                    pending_zeros = 0;
+                    break;
+                }
+                active_index += 1;
+                active_offset = position + 1;
+                pending_zeros = 0;
+                continue;
+            }
+            if (first_nalu..=last_nalu).contains(&active_index) {
+                current.extend(std::iter::repeat_n(0, pending_zeros));
+                current.push(byte);
+            }
+            pending_zeros = 0;
+        }
+        reader.consume(consumed);
+        absolute += consumed as u64;
+        if complete {
+            return Ok(selected);
+        }
+    }
+}
+
+fn rebase_syntax_hex(hex: &str, offset: u64) -> String {
+    hex.lines()
+        .enumerate()
+        .map(|(line, value)| {
+            let bytes = value.split_once("  ").map_or(value, |(_, bytes)| bytes);
+            format!("{:08X}  {bytes}", offset + (line * 16) as u64)
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+fn inspect_selected_h264_nalus(
+    selected: &[(u64, u64, Vec<u8>)],
+) -> Vec<streamscope_core::VideoSyntaxNalu> {
+    selected
+        .iter()
+        .filter_map(|(index, offset, data)| {
+            let mut sample = vec![0, 0, 1];
+            sample.extend_from_slice(data);
+            let mut nalu = streamscope_h264::inspect_annex_b_range(&sample, 1, 1).pop()?;
+            nalu.index = *index;
+            nalu.offset = *offset;
+            nalu.size = data.len() as u64;
+            nalu.hex = rebase_syntax_hex(&nalu.hex, *offset);
+            Some(nalu)
+        })
+        .collect()
+}
+
+fn inspect_selected_h265_nalus(
+    selected: &[(u64, u64, Vec<u8>)],
+) -> Vec<streamscope_core::VideoSyntaxNalu> {
+    selected
+        .iter()
+        .filter_map(|(index, offset, data)| {
+            let mut sample = vec![0, 0, 1];
+            sample.extend_from_slice(data);
+            let mut nalu = streamscope_h265::inspect_annex_b_range(&sample, 1, 1).pop()?;
+            nalu.index = *index;
+            nalu.offset = *offset;
+            nalu.size = data.len() as u64;
+            nalu.hex = rebase_syntax_hex(&nalu.hex, *offset);
+            Some(nalu)
+        })
+        .collect()
+}
+
+#[tauri::command]
+async fn load_video_frame_syntax(
+    app: tauri::AppHandle,
+    report_directory: String,
+    stream_id: Option<String>,
+    display_index: u64,
+) -> Result<streamscope_core::VideoSyntaxDocument, String> {
+    let report_root = default_report_root(&app)?;
+    tauri::async_runtime::spawn_blocking(move || {
+        let (_, source, result) = resolve_report_video_source(
+            &report_root,
+            &report_directory,
+            stream_id.as_deref(),
+            display_index,
+        )?;
+        let deep = result
+            .h264
+            .as_ref()
+            .and_then(|analysis| analysis.deep_analysis.as_ref())
+            .or_else(|| result.h265.as_ref().and_then(|analysis| analysis.deep_analysis.as_ref()))
+            .ok_or_else(|| "当前报告没有逐帧索引".to_string())?;
+        let indexed = deep
+            .frames
+            .iter()
+            .find(|frame| frame.display_index == display_index)
+            .ok_or_else(|| "所选显示帧不在索引中".to_string())?;
+        let access_unit_index = indexed.decode_index.map(|index| index + 1).ok_or_else(|| {
+            "当前解码器没有返回编码顺序号，无法可靠地把显示帧映射到访问单元".to_string()
+        })?;
+        let evidence = result
+            .h264
+            .as_ref()
+            .and_then(|analysis| analysis.frames.iter().find(|frame| frame.frame_number == access_unit_index))
+            .or_else(|| {
+                result.h265.as_ref().and_then(|analysis| {
+                    analysis.frames.iter().find(|frame| frame.frame_number == access_unit_index)
+                })
+            })
+            .ok_or_else(|| "没有找到与该编码序号对应的访问单元证据".to_string())?;
+        let selected = read_annex_b_nalu_range(
+            &source,
+            evidence.first_nalu,
+            evidence.last_nalu,
+        )
+        .map_err(|error| format!("读取视频样本失败：{error}"))?;
+        let (codec, mut nalus, limitations) = if result.h264.is_some() {
+            (
+                "h264",
+                inspect_selected_h264_nalus(&selected),
+                vec![
+                    "字段树覆盖 NALU 头、SPS/PPS 和基础 Slice Header；不解析 Slice Data、CABAC/CAVLC 宏块语法。".into(),
+                    "显示帧到访问单元使用 FFmpeg coded_picture_number；无法取得时不会按显示序号猜测。".into(),
+                ],
+            )
+        } else {
+            (
+                "h265",
+                inspect_selected_h265_nalus(&selected),
+                vec![
+                    "字段树覆盖 NALU 头、SPS/PPS、Slice 起始标志、IRAP no-output 标志和 PPS ID；尚未覆盖完整 HEVC Slice Header。".into(),
+                    "显示帧到访问单元使用 FFmpeg coded_picture_number；CTU/CU/PU/TU 语法不在此基础树中。".into(),
+                ],
+            )
+        };
+        if nalus.is_empty() {
+            return Err("访问单元范围内没有可读取的 Annex B NALU".into());
+        }
+        let evidence_nalus = result
+            .h264
+            .as_ref()
+            .map(|analysis| analysis.nalus.as_slice())
+            .or_else(|| result.h265.as_ref().map(|analysis| analysis.nalus.as_slice()))
+            .unwrap_or_default();
+        for nalu in &mut nalus {
+            if let Some(evidence) = evidence_nalus
+                .iter()
+                .find(|evidence| evidence.nalu_number == nalu.index)
+            {
+                nalu.complete = Some(evidence.complete);
+                nalu.access_unit_number = evidence.access_unit_number;
+                nalu.packets = evidence.packets.clone();
+            }
+        }
+        Ok(streamscope_core::VideoSyntaxDocument {
+            codec: codec.into(),
+            display_index,
+            access_unit_index: Some(access_unit_index),
+            mapping_precision: "ffmpeg_coded_picture_number_to_parser_access_unit".into(),
+            nalus,
+            limitations,
+        })
+    })
+    .await
+    .map_err(|error| format!("视频语法读取任务异常结束：{error}"))?
+}
+
+#[tauri::command]
+async fn export_video_block_csv(
+    app: tauri::AppHandle,
+    report_directory: String,
+    stream_id: Option<String>,
+    display_index: u64,
+    destination_path: String,
+) -> Result<String, String> {
+    let report_root = default_report_root(&app)?;
+    tauri::async_runtime::spawn_blocking(move || {
+        let (directory, source, _) = resolve_report_video_source(
+            &report_root,
+            &report_directory,
+            stream_id.as_deref(),
+            display_index,
+        )?;
+        let destination = PathBuf::from(destination_path);
+        if !destination.is_absolute()
+            || !destination.parent().is_some_and(Path::is_dir)
+            || destination.extension().and_then(|value| value.to_str()) != Some("csv")
+        {
+            return Err("请选择扩展名为 .csv 的绝对保存路径".into());
+        }
+        let frames = directory.join("frames");
+        std::fs::create_dir_all(&frames).map_err(|error| format!("创建块数据目录失败：{error}"))?;
+        let worker_output = frames.join(format!("blocks-{display_index}.json"));
+        let frame = streamscope_ffmpeg::analyze_video_frame_blocks(
+            &source,
+            &worker_output,
+            display_index,
+            std::time::Duration::from_secs(120),
+        )
+        .map_err(|error| error.to_string())?;
+        let csv = render_video_block_csv(&frame);
+        let temporary = destination.with_extension(format!("{}.tmp", std::process::id()));
+        std::fs::write(&temporary, csv.as_bytes())
+            .map_err(|error| format!("写入 CSV 失败：{error}"))?;
+        if destination.exists() {
+            std::fs::remove_file(&destination)
+                .map_err(|error| format!("无法覆盖已有 CSV：{error}"))?;
+        }
+        std::fs::rename(&temporary, &destination).map_err(|error| {
+            let _ = std::fs::remove_file(&temporary);
+            format!("完成 CSV 导出失败：{error}")
+        })?;
+        Ok(destination.display().to_string())
+    })
+    .await
+    .map_err(|error| format!("视频块 CSV 导出任务异常结束：{error}"))?
+}
+
+fn render_video_block_csv(frame: &streamscope_ffmpeg::VideoWorkerFrame) -> String {
+    let mut csv = String::from(
+        "record_type,index,x,y,width,height,qp_base,qp_delta,qp_value,source_direction,source_x,source_y,destination_x,destination_y,motion_x,motion_y,motion_scale,flags,block_level,type_flags,prediction_flags,ref_index_l0,ref_index_l1,reference_poc_l0,reference_poc_l1,partition_mode,sub_partition_modes,prediction_mode,tree_depth,transform_flags\r\n",
+    );
+    if let Some(qp) = &frame.qp {
+        for (index, block) in qp.blocks.iter().enumerate() {
+            csv.push_str(&format!(
+                "qp,{index},{},{},{},{},{},{},{},,,,,,,,,,,,,,,,,,,,,\r\n",
+                block.x, block.y, block.width, block.height, qp.base, block.delta, block.value
+            ));
+        }
+    }
+    for (index, vector) in frame.motion_vectors.iter().enumerate() {
+        csv.push_str(&format!(
+            "mv,{index},,,{},{},,,,{},{},{},{},{},{},{},{},{},,,,,,,,,,,,\r\n",
+            vector.width,
+            vector.height,
+            vector.source_direction,
+            vector.source_x,
+            vector.source_y,
+            vector.destination_x,
+            vector.destination_y,
+            vector.motion_x,
+            vector.motion_y,
+            vector.motion_scale,
+            vector.flags
+        ));
+    }
+    for (index, block) in frame.block_observations.iter().enumerate() {
+        csv.push_str(&format!(
+            "internal,{index},{},{},{},{},,,{},,,,,,{},{},,,{},{},{},\"{}\",\"{}\",{},{},\"{}\",\"{}\",\"{}\",{},{}\r\n",
+            block.x,
+            block.y,
+            block.width,
+            block.height,
+            block.qp.map(|value| value.to_string()).unwrap_or_default(),
+            block
+                .motion_l0_x
+                .map(|value| value.to_string())
+                .unwrap_or_default(),
+            block
+                .motion_l0_y
+                .map(|value| value.to_string())
+                .unwrap_or_default(),
+            block.block_level,
+            block.type_flags,
+            block.prediction_flags,
+            block
+                .ref_index_l0
+                .iter()
+                .map(i8::to_string)
+                .collect::<Vec<_>>()
+                .join(";"),
+            block
+                .ref_index_l1
+                .iter()
+                .map(i8::to_string)
+                .collect::<Vec<_>>()
+                .join(";"),
+            block
+                .reference_poc_l0
+                .iter()
+                .map(|value| value.map(|value| value.to_string()).unwrap_or_default())
+                .collect::<Vec<_>>()
+                .join(";"),
+            block
+                .reference_poc_l1
+                .iter()
+                .map(|value| value.map(|value| value.to_string()).unwrap_or_default())
+                .collect::<Vec<_>>()
+                .join(";"),
+            block.partition_mode.as_deref().unwrap_or_default(),
+            block
+                .sub_partition_modes
+                .iter()
+                .map(|value| value.as_deref().unwrap_or_default())
+                .collect::<Vec<_>>()
+                .join(";"),
+            block.prediction_mode.as_deref().unwrap_or_default(),
+            block
+                .tree_depth
+                .map(|value| value.to_string())
+                .unwrap_or_default(),
+            block
+                .transform_flags
+                .map(|value| value.to_string())
+                .unwrap_or_default(),
+        ));
+    }
+    csv
 }
 
 #[tauri::command]
@@ -522,7 +1152,15 @@ pub fn run() {
             analyze_audio_file,
             analyze_pcap_file,
             compare_rtsp,
+            cancel_analysis,
             export_media,
+            extract_video_frame,
+            compare_video_reference,
+            load_video_reference_comparison,
+            load_video_reference_difference,
+            analyze_video_frame_blocks,
+            load_video_frame_syntax,
+            export_video_block_csv,
             list_analysis_history,
             load_report_html,
             load_analysis_run,
@@ -531,4 +1169,118 @@ pub fn run() {
         ])
         .run(tauri::generate_context!())
         .expect("StreamScope 桌面程序启动失败");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use streamscope_ffmpeg::{
+        VideoBlockObservation, VideoMotionVector, VideoQpBlock, VideoQpData, VideoWorkerFrame,
+    };
+
+    #[test]
+    fn selected_syntax_reader_does_not_require_loading_the_whole_file() {
+        let path = std::env::temp_dir().join(format!(
+            "streamscope-syntax-range-{}-{}.h264",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::write(
+            &path,
+            [
+                &[0, 0, 0, 1, 0x67, 0x42][..],
+                &[0, 0, 1, 0x68, 0xce][..],
+                &[0, 0, 1, 0x65, 0x88][..],
+            ]
+            .concat(),
+        )
+        .unwrap();
+        let selected = read_annex_b_nalu_range(&path, 2, 2).unwrap();
+        assert_eq!(selected, vec![(2, 9, vec![0x68, 0xce])]);
+        let syntax = inspect_selected_h264_nalus(&selected);
+        assert_eq!(syntax[0].index, 2);
+        assert_eq!(syntax[0].offset, 9);
+        assert!(syntax[0].hex.starts_with("00000009"));
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn block_csv_has_stable_thirty_column_schema() {
+        let frame = VideoWorkerFrame {
+            display_index: 7,
+            pts: 7,
+            best_effort_timestamp: 7,
+            time_base_num: 1,
+            time_base_den: 25,
+            width: 1920,
+            height: 1080,
+            key_frame: false,
+            picture_type: "P".into(),
+            interlaced: false,
+            analyzer_version: Some("test-worker".into()),
+            qp: Some(VideoQpData {
+                base: 23,
+                blocks: vec![VideoQpBlock {
+                    x: 16,
+                    y: 32,
+                    width: 16,
+                    height: 16,
+                    delta: 2,
+                    value: 25,
+                }],
+            }),
+            motion_vectors: vec![VideoMotionVector {
+                source_direction: -1,
+                width: 16,
+                height: 16,
+                source_x: 18,
+                source_y: 31,
+                destination_x: 16,
+                destination_y: 32,
+                motion_x: 8,
+                motion_y: -4,
+                motion_scale: 4,
+                flags: 0,
+            }],
+            block_observations: vec![VideoBlockObservation {
+                x: 32,
+                y: 48,
+                width: 8,
+                height: 8,
+                block_level: "hevc_pu".into(),
+                type_flags: 2,
+                prediction_flags: 3,
+                qp: Some(27),
+                partition_mode: Some("2NxN".into()),
+                sub_partition_modes: Vec::new(),
+                prediction_mode: Some("inter".into()),
+                tree_depth: Some(2),
+                transform_flags: Some(5),
+                ref_index_l0: vec![0],
+                ref_index_l1: vec![1],
+                reference_poc_l0: vec![Some(4), None, None, None],
+                reference_poc_l1: vec![Some(8), None, None, None],
+                motion_l0_x: Some(12),
+                motion_l0_y: Some(-4),
+                motion_l1_x: Some(-8),
+                motion_l1_y: Some(2),
+            }],
+        };
+        let csv = render_video_block_csv(&frame);
+        let rows = csv.trim_end().lines().collect::<Vec<_>>();
+        assert_eq!(rows.len(), 4);
+        assert_eq!(
+            rows.iter()
+                .map(|row| row.split(',').count())
+                .collect::<Vec<_>>(),
+            [30, 30, 30, 30]
+        );
+        assert!(rows[1].starts_with("qp,0,16,32,16,16,23,2,25,"));
+        assert!(rows[2].starts_with("mv,0,,,16,16,,,,-1,18,31,16,32,8,-4,4,0"));
+        assert!(rows[3].starts_with("internal,0,32,48,8,8,,,27"));
+        assert!(rows[3].ends_with(",\"2NxN\",\"\",\"inter\",2,5"));
+    }
 }

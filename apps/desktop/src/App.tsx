@@ -9,9 +9,16 @@ import type {
   AnalysisStatus,
   ComparisonRun,
   RecentRun,
+  VideoDeepAnalysis,
+  VideoNaluEvidence,
+  VideoParameterChange,
+  VideoRecoveryWindow,
+  VideoReferenceComparison,
+  VideoSyntaxDocument,
+  VideoWorkerFrame,
 } from "./types";
 
-type View = "overview" | "playback" | "audioQuality" | "protocol" | "stream" | "diagnostics" | "timeline" | "report" | "log";
+type View = "overview" | "playback" | "audioQuality" | "protocol" | "stream" | "videoDeep" | "diagnostics" | "timeline" | "report" | "log";
 type InputMode = "rtsp" | "h264" | "h265" | "audio" | "pcap";
 type TransportMode = "tcp" | "udp" | "compare";
 type AudioExportFormat = "wav" | "mp3" | "m4a" | "flac" | "ogg";
@@ -65,6 +72,7 @@ function App() {
   const [duration, setDuration] = useState(10);
   const [connectTimeout, setConnectTimeout] = useState(10);
   const [running, setRunning] = useState(false);
+  const [cancelling, setCancelling] = useState(false);
   const [error, setError] = useState("");
   const [run, setRun] = useState<AnalysisRun | null>(null);
   const [selectedStreamId, setSelectedStreamId] = useState<string | null>(null);
@@ -77,6 +85,7 @@ function App() {
   const [exporting, setExporting] = useState(false);
   const [exportMessage, setExportMessage] = useState("");
   const [pendingAudioSeek, setPendingAudioSeek] = useState<number | null>(null);
+  const [requestedVideoFrame, setRequestedVideoFrame] = useState(0);
   const [selectedAudioTrackId, setSelectedAudioTrackId] = useState<string | null>(null);
   const reportFrame = useRef<HTMLIFrameElement>(null);
   const previewVideo = useRef<HTMLVideoElement>(null);
@@ -132,6 +141,23 @@ function App() {
       setError(String(reason));
     } finally {
       setRunning(false);
+      setCancelling(false);
+    }
+  }
+
+  async function cancelCurrentAnalysis() {
+    if (!running || cancelling) return;
+    setCancelling(true);
+    setProgress((current) => ({
+      percent: current?.percent ?? 0,
+      stage: "正在取消",
+      detail: "正在停止采集、解析和外部解码进程",
+    }));
+    try {
+      await invoke("cancel_analysis");
+    } catch (reason) {
+      setCancelling(false);
+      setError(`取消任务失败：${String(reason)}`);
     }
   }
 
@@ -273,6 +299,7 @@ function App() {
   const protocol = result?.protocol;
   const h264 = result?.h264;
   const h265 = result?.h265;
+  const videoDeep = h264?.deep_analysis ?? h265?.deep_analysis;
   const audioTracks = result?.audio_tracks ?? [];
   const selectedAudioTrack = audioTracks.find((track) => track.id === selectedAudioTrackId) ?? audioTracks[0];
   const audio = selectedAudioTrack?.analysis ?? result?.audio;
@@ -299,7 +326,16 @@ function App() {
     return () => window.clearTimeout(timer);
   }, [view, pendingAudioSeek, previewAudioSource]);
   const playbackSync = result?.av_sync?.find((item) => item.offset_ms !== null && item.confidence_percent >= 80 && (!selectedAudioTrack || item.audio_stream_id === selectedAudioTrack.id));
-  const finalRtspStatus = (method: string) => protocol?.transactions.filter((item) => item.method === method).at(-1)?.status_code;
+  const rtspStatusSummary = (method: string) => {
+    const statuses = protocol?.transactions.filter((item) => item.method === method).map((item) => item.status_code) ?? [];
+    const unique = [...new Set(statuses)];
+    if (unique.length === 0) return "—";
+    const text = unique.map((status) => status === 0 ? "无响应" : status.toString()).join(" / ");
+    return unique.length > 1 ? `${text}（不一致）` : text;
+  };
+  const protocolPacketCount = captureOverview
+    ? (run?.result.streams ?? []).reduce((total, item) => total + (item.protocol?.rtp.packet_count ?? 0), 0)
+    : protocol?.rtp.packet_count ?? 0;
   const videoClockRate = identity ? identity.clock_rate : protocol?.media.find((item) => item.media_type === "video")?.clock_rate ?? 90_000;
   const jitterMs = protocol && videoClockRate ? protocol.rtp.jitter * 1000 / videoClockRate : null;
 
@@ -429,7 +465,7 @@ function App() {
 
         <div className="sidebar-footer">
           <span className="online-dot" />本机分析引擎
-          <small>高级音画诊断 · v0.1.4</small>
+          <small>高级音画诊断 · v0.1.5</small>
         </div>
       </aside>
 
@@ -527,6 +563,7 @@ function App() {
                 <><span className="play-icon">▶</span>{inputMode === "rtsp" ? "开始诊断" : inputMode === "pcap" ? "扫描媒体流" : "分析文件"}</>
               )}
             </button>
+            {running && <button className="cancel-analysis-button" type="button" disabled={cancelling} onClick={() => { void cancelCurrentAnalysis(); }}>{cancelling ? "正在停止…" : "取消分析"}</button>}
             {running && progress && (
               <>
                 <div className="progress-row" aria-live="polite">
@@ -579,9 +616,11 @@ function App() {
                   {audioQuality && <button className={view === "audioQuality" ? "active" : ""} onClick={() => setView("audioQuality")} type="button">音频质量</button>}
                   <button className={view === "protocol" ? "active" : ""} onClick={() => setView("protocol")} type="button">协议</button>
                   <button className={view === "stream" ? "active" : ""} onClick={() => setView("stream")} type="button">码流</button>
+                  {(h264 || h265) && <button className={view === "videoDeep" ? "active" : ""} onClick={() => setView("videoDeep")} type="button">视频深度分析</button>}
                   <button className={view === "diagnostics" ? "active" : ""} onClick={() => setView("diagnostics")} type="button">诊断</button>
                   <button className={view === "timeline" ? "active" : ""} onClick={() => setView("timeline")} type="button">时间线</button>
                   </>}
+                  {captureOverview && protocol && <button className={view === "protocol" ? "active" : ""} onClick={() => setView("protocol")} type="button">RTSP 协商</button>}
                   <button className={view === "report" ? "active" : ""} onClick={showReport} type="button">报告预览</button>
                   {!captureOverview && <button className={view === "log" ? "active" : ""} onClick={() => setView("log")} type="button">FFmpeg 日志</button>}
                 </div>
@@ -767,6 +806,10 @@ function App() {
                   />
                 </>}
 
+                {view === "videoDeep" && (h264 || h265) && (
+                  <VideoDeepAnalysisView analysis={videoDeep ?? null} nalus={h265?.nalus ?? h264?.nalus ?? []} parameterChanges={h265?.parameter_changes ?? h264?.parameter_changes ?? []} recoveryWindows={h265?.recovery_windows ?? h264?.recovery_windows ?? []} initialDisplayIndex={requestedVideoFrame} codec={h265 ? "H.265 / HEVC" : "H.264 / AVC"} reportDirectory={run.report_directory} streamId={selectedStreamId} />
+                )}
+
                 {view === "protocol" && (
                   <div className="protocol-view">
                     {!protocol ? (
@@ -776,9 +819,9 @@ function App() {
                         <div className="protocol-facts">
                           <Metric label="RTSP 服务端" value={protocol.server ?? "未声明"} detail={protocol.authenticated ? "已完成鉴权" : "无需鉴权"} />
                           <Metric label="Session" value={protocol.session_id ?? "—"} detail={`${protocol.transactions.length} 次事务`} />
-                          <Metric label="SETUP / PLAY" value={`${finalRtspStatus("SETUP") ?? "—"} / ${finalRtspStatus("PLAY") ?? "—"}`} detail={protocol.authenticated ? "401 为鉴权挑战，最终状态优先" : "最终事务状态"} />
+                          <Metric label="SETUP / PLAY" value={`${rtspStatusSummary("SETUP")} / ${rtspStatusSummary("PLAY")}`} detail="显示全部响应状态；不一致时不按单次成功判定" />
                           <Metric label="传输" value={result.request.transport?.toUpperCase() ?? "—"} detail={protocol.negotiated_transport ?? (protocol.interleaved_rtp_channel !== null ? `Interleaved ${protocol.interleaved_rtp_channel}-${protocol.interleaved_rtcp_channel}` : "UDP RTP / RTCP")} />
-                          <Metric label="RTP 包" value={protocol.rtp.packet_count.toString()} detail={`${protocol.rtp.payload_bytes} B 负载`} />
+                          <Metric label={captureOverview ? "已发现 RTP 包" : "RTP 包"} value={protocolPacketCount.toString()} detail={captureOverview ? `${run.result.streams?.length ?? 0} 个实际媒体流/候选` : `${protocol.rtp.payload_bytes} B 负载`} />
                           <Metric label="平均 / 峰值码率" value={`${formatBitRate(protocol.rtp.average_bit_rate_bps)} / ${formatBitRate(protocol.rtp.peak_bit_rate_bps)}`} detail={`${protocol.rtp.bit_rate_window_ms ?? 1_000} ms 峰值窗口`} />
                           <Metric label={identity ? "序列缺口" : "丢包"} value={protocol.rtp.lost_packets.toString()} detail={`${protocol.rtp.out_of_order_packets} 乱序 / ${protocol.rtp.duplicate_packets} 重复`} />
                           <Metric label="Jitter" value={jitterMs !== null ? `${jitterMs.toFixed(2)} ms` : "时钟未知"} detail={`${protocol.rtp.jitter.toFixed(2)} timestamp units`} />
@@ -833,10 +876,36 @@ function App() {
                           <div className="parameter-card" key={sps.id}>
                             <span>SPS {sps.id}</span>
                             <strong>{sps.width} × {sps.height}</strong>
-                            <small>Profile {sps.profile_idc} · Level {(sps.level_idc / 10).toFixed(1)} · {sps.progressive ? "Progressive" : "Interlaced"}</small>
+                            <small>Profile {sps.profile_idc} · Level {sps.level_idc === 11 && sps.constraint_set3_flag ? "1b" : (sps.level_idc / 10).toFixed(1)} · {sps.progressive ? "Progressive" : "Interlaced"}</small>
                             <small>{sps.bit_depth_luma}-bit · {sps.max_num_ref_frames} reference frames</small>
+                            <small>{sps.nal_hrd || sps.vcl_hrd ? `HRD ${(sps.nal_hrd ?? sps.vcl_hrd)!.maximum_bit_rate_bps.toLocaleString()} bps · CPB ${(sps.nal_hrd ?? sps.vcl_hrd)!.maximum_cpb_size_bits.toLocaleString()} bits` : "未声明 HRD"}{sps.max_dec_frame_buffering != null ? ` · VUI DPB ${sps.max_dec_frame_buffering}` : ""}</small>
                           </div>
                         ))}
+                        {h264.hrd_simulation && <div className="evidence-list">
+                          <h3>HRD / CPB 逐 AU 仿真</h3>
+                          <div className="protocol-facts">
+                            <Metric label="状态" value={h264.hrd_simulation.status === "simulated_cbr_single_cpb" ? "已完成" : h264.hrd_simulation.status === "not_declared" ? "未声明 HRD" : "证据不足"} detail={h264.hrd_simulation.status === "simulated_cbr_single_cpb" ? `${h264.hrd_simulation.schedule.toUpperCase()} schedule · SPS ${h264.hrd_simulation.sps_id ?? "—"}` : "未输出确定性 CPB 结论"} />
+                            <Metric label="SEI 证据" value={`${h264.hrd_simulation.buffering_period_count} / ${h264.hrd_simulation.pic_timing_count}`} detail="buffering_period / pic_timing" />
+                            <Metric label="已仿真 AU" value={h264.hrd_simulation.simulated_aus.toLocaleString()} detail={h264.hrd_simulation.points_truncated ? "明细已截断" : "明细完整保留"} />
+                            <Metric label="CPB fullness" value={`${h264.hrd_simulation.minimum_fullness_bits?.toLocaleString() ?? "—"} / ${h264.hrd_simulation.maximum_fullness_bits?.toLocaleString() ?? "—"}`} detail="最小 / 最大 bits" />
+                            <Metric label="越界" value={`${h264.hrd_simulation.overflow_aus.length} / ${h264.hrd_simulation.underflow_aus.length}`} detail="溢出 / 下溢 AU" />
+                            <Metric label="时序不连续" value={h264.hrd_simulation.delay_discontinuities.length.toString()} detail="cpb_removal_delay 零增量" />
+                          </div>
+                          {h264.hrd_simulation.points.length > 0 && <details>
+                            <summary>逐 AU CPB 明细（显示前 200 条）</summary>
+                            <div className="transaction-table">
+                              <div className="table-head"><span>AU / SEI</span><span>AU bits</span><span>Removal / Output delay</span><span>移除前 / 后 fullness</span><span>状态</span></div>
+                              {h264.hrd_simulation.points.slice(0, 200).map((point) => <div className="table-row" key={`${point.access_unit}-${point.sei_nalu}`}>
+                                <strong>#{point.access_unit} / NALU #{point.sei_nalu}</strong>
+                                <span>{point.access_unit_bits.toLocaleString()}</span>
+                                <span>{point.cpb_removal_delay} / {point.dpb_output_delay}</span>
+                                <span>{point.fullness_before_removal_bits.toLocaleString()} / {point.fullness_after_removal_bits.toLocaleString()}</span>
+                                <code>{point.overflow ? "CPB 溢出" : point.underflow ? "CPB 下溢" : "正常"}</code>
+                              </div>)}
+                            </div>
+                          </details>}
+                          {h264.hrd_simulation.limitations.map((item) => <p className="capture-note" key={item}>{item}</p>)}
+                        </div>}
                         <div className="nalu-grid">
                           {Object.entries(h264.nalu_types).map(([name, count]) => (
                             <div key={name}><span>{name}</span><strong>{count}</strong></div>
@@ -870,6 +939,7 @@ function App() {
                             <strong>{sps.width} × {sps.height}</strong>
                             <small>Profile {sps.profile_idc} · Level {(sps.level_idc / 30).toFixed(1)} · {sps.max_sub_layers} temporal layers</small>
                             <small>{sps.bit_depth_luma}-bit luma · {sps.bit_depth_chroma}-bit chroma</small>
+                            <small>DPB {sps.max_dec_pic_buffering ?? "—"} frames · reorder {sps.max_num_reorder_pics ?? "—"}</small>
                           </div>
                         ))}
                         <div className="nalu-grid">
@@ -923,15 +993,21 @@ function App() {
                     <TimelineChart events={result.timeline} />
                     {result.timeline.length === 0 ? (
                       <div className="protocol-empty">本次任务没有可展示的时间线事件。</div>
-                    ) : result.timeline.map((event, index) => (
-                      <div className={`timeline-event ${event.severity}`} key={`${event.source}-${event.event_type}-${index}`}>
+                    ) : result.timeline.map((event, index) => {
+                      const mappedFrame = videoDeep && event.frame_number != null && !event.location_precision?.startsWith("visual_scan_")
+                        ? videoDeep.frames.find((frame) => frame.decode_index === event.frame_number! - 1)
+                        : videoDeep && event.offset_ms != null
+                          ? videoDeep.frames.filter((frame) => frame.pts_ms != null).reduce<typeof videoDeep.frames[number] | null>((nearest, frame) => nearest == null || Math.abs(frame.pts_ms! - event.offset_ms!) < Math.abs(nearest.pts_ms! - event.offset_ms!) ? frame : nearest, null)
+                          : null;
+                      return <div className={`timeline-event ${event.severity}`} key={`${event.source}-${event.event_type}-${index}`}>
                         <span className="timeline-dot" />
                         <time>{event.offset_ms === null ? "时序未知" : `+${event.offset_ms} ms`}</time>
                         <strong>{event.source} · {event.event_type}</strong>
                         <p>{event.detail}</p>
                         {(event.frame_number != null || event.sequence !== null || event.rtp_timestamp !== null) && <code>帧 {event.frame_number ?? "—"} · 包 #{event.first_packet ?? "—"}{event.last_packet != null && event.last_packet !== event.first_packet ? `–#${event.last_packet}` : ""} · Seq {event.sequence ?? "—"} · TS {event.rtp_timestamp ?? "—"} · {event.location_precision ?? "位置未知"}</code>}
-                      </div>
-                    ))}
+                        {mappedFrame && <button type="button" onClick={() => { setRequestedVideoFrame(mappedFrame.display_index); setView("videoDeep"); }}>定位显示帧 #{mappedFrame.display_index}</button>}
+                      </div>;
+                    })}
                   </div>
                 )}
 
@@ -1188,6 +1264,339 @@ function AudioSpectrogramChart({ quality }: { quality: AudioQuality }) {
 function formatFrequency(value: number): string {
   if (value >= 1_000) return `${Number((value / 1_000).toFixed(value >= 10_000 ? 0 : 1))}k`;
   return `${Math.round(value)}`;
+}
+
+function qpColor(value: number): string {
+  const normalized = Math.max(0, Math.min(51, value));
+  return `hsl(${(51 - normalized) * 2.35} 88% 50%)`;
+}
+
+function qpStatistics(qp: NonNullable<VideoWorkerFrame["qp"]> | null | undefined) {
+  if (!qp || qp.blocks.length === 0) return null;
+  let minimum = Number.POSITIVE_INFINITY;
+  let maximum = Number.NEGATIVE_INFINITY;
+  let weighted = 0;
+  let area = 0;
+  for (const block of qp.blocks) {
+    const blockArea = Math.max(1, block.width * block.height);
+    minimum = Math.min(minimum, block.value);
+    maximum = Math.max(maximum, block.value);
+    weighted += block.value * blockArea;
+    area += blockArea;
+  }
+  return { minimum, maximum, average: weighted / area };
+}
+
+function VideoDeepAnalysisView({ analysis, nalus, parameterChanges, recoveryWindows, initialDisplayIndex, codec, reportDirectory, streamId }: { analysis: VideoDeepAnalysis | null; nalus: VideoNaluEvidence[]; parameterChanges: VideoParameterChange[]; recoveryWindows: VideoRecoveryWindow[]; initialDisplayIndex: number; codec: string; reportDirectory: string; streamId: string | null }) {
+  const [selectedIndex, setSelectedIndex] = useState(0);
+  const [frameImage, setFrameImage] = useState("");
+  const [frameImageError, setFrameImageError] = useState("");
+  const [frameImageLoading, setFrameImageLoading] = useState(false);
+  const [blockFrame, setBlockFrame] = useState<VideoWorkerFrame | null>(null);
+  const [blockLoading, setBlockLoading] = useState(false);
+  const [blockExporting, setBlockExporting] = useState(false);
+  const [showQp, setShowQp] = useState(true);
+  const [showMotion, setShowMotion] = useState(true);
+  const [blockLayer, setBlockLayer] = useState(codec.toLowerCase().includes("264") ? "h264_macroblock" : "hevc_cu");
+  const [selectedBlockDetail, setSelectedBlockDetail] = useState("");
+  const [syntax, setSyntax] = useState<VideoSyntaxDocument | null>(null);
+  const [syntaxNaluIndex, setSyntaxNaluIndex] = useState(0);
+  const [syntaxLoading, setSyntaxLoading] = useState(false);
+  const [packetLookup, setPacketLookup] = useState("");
+  const [referenceComparison, setReferenceComparison] = useState<VideoReferenceComparison | null>(null);
+  const [referenceDifference, setReferenceDifference] = useState("");
+  const [referenceLoading, setReferenceLoading] = useState(false);
+  const [referenceError, setReferenceError] = useState("");
+  const frameImageRequest = useRef(0);
+  const blockRequest = useRef(0);
+  const syntaxRequest = useRef(0);
+  const referenceRequest = useRef(0);
+  useEffect(() => {
+    frameImageRequest.current += 1;
+    blockRequest.current += 1;
+    syntaxRequest.current += 1;
+    referenceRequest.current += 1;
+    setSelectedIndex(Math.max(0, Math.min((analysis?.frames.length ?? 1) - 1, initialDisplayIndex)));
+    setFrameImage(""); setFrameImageError(""); setFrameImageLoading(false);
+    setBlockFrame(null); setBlockLoading(false); setSelectedBlockDetail("");
+    setSyntax(null); setSyntaxLoading(false);
+    setReferenceComparison(null); setReferenceDifference(""); setReferenceLoading(false); setReferenceError("");
+  }, [analysis, initialDisplayIndex, reportDirectory, streamId]);
+  useEffect(() => {
+    if (!analysis) return;
+    let disposed = false;
+    const request = ++referenceRequest.current;
+    void invoke<VideoReferenceComparison | null>("load_video_reference_comparison", { reportDirectory, streamId })
+      .then((value) => { if (!disposed && referenceRequest.current === request) setReferenceComparison(value); })
+      .catch(() => { /* No saved comparison is a normal initial state. */ });
+    void invoke<string | null>("load_video_reference_difference", { reportDirectory, streamId })
+      .then((value) => { if (!disposed && referenceRequest.current === request) setReferenceDifference(value ? convertFileSrc(value) : ""); })
+      .catch(() => { /* No saved difference preview is a normal initial state. */ });
+    return () => { disposed = true; };
+  }, [analysis, reportDirectory, streamId]);
+  if (!analysis) {
+    return <div className="video-deep-view"><div className="protocol-empty">当前结果没有逐帧索引。请确认 ffprobe 可用，并对抓包流执行“深入分析此流”。</div></div>;
+  }
+  const frame = analysis.frames[selectedIndex];
+  const visibleFrames = analysis.frames.slice(0, 1_000);
+  const rangeStart = Math.max(0, selectedIndex - 20);
+  const tableFrames = analysis.frames.slice(rangeStart, rangeStart + 41);
+  const choose = (index: number) => {
+    frameImageRequest.current += 1;
+    blockRequest.current += 1;
+    syntaxRequest.current += 1;
+    setFrameImageLoading(false); setBlockLoading(false); setSyntaxLoading(false);
+    setSelectedIndex(Math.max(0, Math.min(analysis.frames.length - 1, index))); setFrameImage(""); setFrameImageError(""); setBlockFrame(null); setSelectedBlockDetail(""); setSyntax(null); setSyntaxNaluIndex(0);
+  };
+  const loadFrameImage = async () => {
+    const request = ++frameImageRequest.current;
+    const displayIndex = selectedIndex;
+    setFrameImageLoading(true);
+    setFrameImageError("");
+    try {
+      const path = await invoke<string>("extract_video_frame", { reportDirectory, streamId, displayIndex });
+      if (frameImageRequest.current === request) setFrameImage(convertFileSrc(path));
+    } catch (reason) {
+      if (frameImageRequest.current === request) setFrameImageError(String(reason));
+    } finally {
+      if (frameImageRequest.current === request) setFrameImageLoading(false);
+    }
+  };
+  const loadBlockData = async () => {
+    const request = ++blockRequest.current;
+    const displayIndex = selectedIndex;
+    setBlockLoading(true);
+    setFrameImageError("");
+    try {
+      const [path, blocks] = await Promise.all([
+        frameImage ? Promise.resolve("") : invoke<string>("extract_video_frame", { reportDirectory, streamId, displayIndex }),
+        invoke<VideoWorkerFrame>("analyze_video_frame_blocks", { reportDirectory, streamId, displayIndex }),
+      ]);
+      if (blockRequest.current !== request) return;
+      if (path) setFrameImage(convertFileSrc(path));
+      setBlockFrame(blocks);
+    } catch (reason) {
+      if (blockRequest.current === request) setFrameImageError(String(reason));
+    } finally {
+      if (blockRequest.current === request) setBlockLoading(false);
+    }
+  };
+  const loadSyntax = async () => {
+    const request = ++syntaxRequest.current;
+    const displayIndex = selectedIndex;
+    setSyntaxLoading(true);
+    setFrameImageError("");
+    try {
+      const document = await invoke<VideoSyntaxDocument>("load_video_frame_syntax", { reportDirectory, streamId, displayIndex });
+      if (syntaxRequest.current !== request) return;
+      setSyntax(document);
+      setSyntaxNaluIndex(0);
+    } catch (reason) {
+      if (syntaxRequest.current === request) setFrameImageError(String(reason));
+    } finally {
+      if (syntaxRequest.current === request) setSyntaxLoading(false);
+    }
+  };
+  const exportBlockCsv = async () => {
+    setBlockExporting(true);
+    setFrameImageError("");
+    try {
+      const destination = await save({
+        defaultPath: `frame-${selectedIndex}-blocks.csv`,
+        filters: [{ name: "CSV", extensions: ["csv"] }],
+      });
+      if (!destination) return;
+      const path = await invoke<string>("export_video_block_csv", { reportDirectory, streamId, displayIndex: selectedIndex, destinationPath: destination });
+      setSelectedBlockDetail(`块数据已导出：${path}`);
+    } catch (reason) {
+      setFrameImageError(String(reason));
+    } finally {
+      setBlockExporting(false);
+    }
+  };
+  const compareReference = async () => {
+    const request = ++referenceRequest.current;
+    setReferenceLoading(true);
+    setReferenceError("");
+    try {
+      const reference = await open({
+        multiple: false,
+        directory: false,
+        filters: [{ name: "参考视频", extensions: ["h264", "264", "h265", "265", "hevc", "mp4", "mkv", "mov", "avi", "ts", "m2ts", "webm"] }],
+      });
+      if (typeof reference !== "string") return;
+      const result = await invoke<VideoReferenceComparison>("compare_video_reference", { reportDirectory, streamId, referencePath: reference });
+      if (referenceRequest.current !== request) return;
+      setReferenceComparison(result);
+      const difference = await invoke<string | null>("load_video_reference_difference", { reportDirectory, streamId });
+      if (referenceRequest.current === request) setReferenceDifference(difference ? convertFileSrc(difference) : "");
+    } catch (reason) {
+      if (referenceRequest.current === request) setReferenceError(String(reason));
+    } finally {
+      if (referenceRequest.current === request) setReferenceLoading(false);
+    }
+  };
+  const displayedVectors = blockFrame?.motion_vectors.filter((_, index, values) => index % Math.max(1, Math.ceil(values.length / 2_000)) === 0) ?? [];
+  const internalBlocks = blockFrame?.block_observations ?? [];
+  const internalMotion = internalBlocks.filter((block) => block.block_level === "hevc_pu" && block.prediction_flags !== 0);
+  const selectedLayerBlocks = blockLayer ? internalBlocks.filter((block) => block.block_level === blockLayer) : [];
+  const displayedLayerBlocks = selectedLayerBlocks.filter((_, index, values) => index % Math.max(1, Math.ceil(values.length / 5_000)) === 0);
+  const hevcTreeCounts = codec.toLowerCase().includes("264") ? "" : ["hevc_ctu", "hevc_cu", "hevc_pu", "hevc_tu"].map((level) => `${level.slice(5).toUpperCase()} ${internalBlocks.filter((block) => block.block_level === level).length.toLocaleString()}`).join(" / ");
+  const syntaxNalu = syntax?.nalus[syntaxNaluIndex];
+  const qpStats = qpStatistics(blockFrame?.qp);
+  const packetNumber = Number(packetLookup);
+  const packetMatches = Number.isSafeInteger(packetNumber) && packetNumber > 0 ? nalus.filter((nalu) => nalu.packets.some((packet) => packet.packet_number === packetNumber)) : [];
+  return <div className="video-deep-view">
+    <div className="video-deep-heading">
+      <div><h3>{codec} 帧工作台</h3><p>索引值来自本次实际 ffprobe 解码输出；未取得的块级数据不会显示为 0。</p></div>
+      <span className={analysis.coverage_complete ? "scan-ok" : "scan-warning"}>{analysis.coverage_complete ? "索引覆盖完整" : "索引覆盖受限"}</span>
+    </div>
+    <div className="evidence-list parameter-change-list">
+      <h3>参数集变更 · {parameterChanges.length}</h3>
+      {parameterChanges.length === 0 ? <p className="capture-note">保留样本中没有发现同一参数集 ID 的字段变化。</p> : parameterChanges.map((change) => <div className="evidence" key={`${change.nalu_number}-${change.parameter_kind}-${change.parameter_id}`}>
+        <strong>{change.parameter_kind.toUpperCase()} #{change.parameter_id}</strong>
+        <span>NALU #{change.nalu_number} · 从 AU #{change.effective_access_unit ?? "未知"} 生效</span>
+        <code>{change.changed_fields.join("、")}</code>
+      </div>)}
+    </div>
+    <div className="evidence-list parameter-change-list">
+      <h3>传播与恢复窗口 · {recoveryWindows.length}</h3>
+      {recoveryWindows.length === 0 ? <p className="capture-note">当前覆盖范围内没有可关联到帧的结构或解码异常起点。</p> : recoveryWindows.slice(0, 200).map((window, index) => <div className="evidence" key={`${window.source_frame}-${window.source_kind}-${index}`}>
+        <strong>异常帧 #{window.source_frame} · {window.source_kind}</strong>
+        <span>{window.next_random_access_frame == null ? "覆盖范围内未观察到后续 IDR/CRA" : `下一随机接入帧 #${window.next_random_access_frame} · 等待 ${window.wait_frames ?? "未知"} 帧${window.wait_ms == null ? "" : ` / ${window.wait_ms} ms`}`}</span>
+        <code>{window.visual_status === "post_access_anomaly_candidate" ? "随机接入点后仍有画面异常候选" : "未确认画面恢复"}</code>
+        {window.first_packet != null && <small>抓包 #{window.first_packet}{window.last_packet != null && window.last_packet !== window.first_packet ? `–${window.last_packet}` : ""}</small>}
+        {window.limitations.map((item) => <small key={item}>{item}</small>)}
+      </div>)}
+    </div>
+    <div className="protocol-facts video-deep-facts">
+      <Metric label="索引帧" value={analysis.indexed_frames.toLocaleString()} detail={analysis.status} />
+      <Metric label="覆盖起点" value={formatDuration(analysis.coverage_start_ms)} detail="PTS/best effort" />
+      <Metric label="覆盖终点" value={formatDuration(analysis.coverage_end_ms)} detail="PTS + duration" />
+      <Metric label="关键帧" value={analysis.frames.filter((item) => item.key_frame).length.toLocaleString()} detail="ffprobe key_frame" />
+      <Metric label="帧型" value={[...new Set(analysis.frames.map((item) => item.picture_type).filter(Boolean))].join(" / ") || "—"} detail="解码器报告" />
+    </div>
+    {analysis.coverage_reason && <div className="deep-warning">{analysis.coverage_reason}</div>}
+    <div className="deep-capabilities">
+      {analysis.capabilities.map((capability) => <div className={capability.status === "available" ? "available" : capability.status === "on_demand" ? "on-demand" : "unavailable"} key={capability.id}>
+        <strong>{capability.label}</strong><span>{capability.status === "available" ? "可用" : capability.status === "on_demand" ? "按帧加载" : "尚不可用"}</span>{capability.reason && <small>{capability.reason}</small>}
+      </div>)}
+    </div>
+    <div className="evidence-list parameter-change-list">
+      <div className="video-deep-heading">
+        <div><h3>参考视频质量对比</h3><p>按起始帧对齐，将参考画面缩放到当前视频尺寸，只比较共同有效帧。</p></div>
+        <button type="button" disabled={referenceLoading} onClick={() => { void compareReference(); }}>{referenceLoading ? "正在计算 PSNR / SSIM…" : "选择参考视频并计算"}</button>
+      </div>
+      {referenceComparison && <>
+        <div className="protocol-facts video-deep-facts">
+          <Metric label="参考文件" value={referenceComparison.reference_name} detail="仅记录文件名" />
+          <Metric label="PSNR" value={referenceComparison.psnr_identical ? "∞" : referenceComparison.psnr_average_db == null ? "—" : `${referenceComparison.psnr_average_db.toFixed(3)} dB`} detail={referenceComparison.psnr_identical ? "逐像素一致" : "平均值"} />
+          <Metric label="SSIM" value={referenceComparison.ssim_all.toFixed(6)} detail="All" />
+          <Metric label="VMAF" value={referenceComparison.vmaf_mean == null ? "不可用" : referenceComparison.vmaf_mean.toFixed(3)} detail="可选 libvmaf" />
+          <Metric label="比较帧数" value={referenceComparison.compared_frames.toLocaleString()} detail="共同有效范围" />
+          <Metric label="共同覆盖" value={formatDuration(referenceComparison.compared_duration_ms)} detail={referenceComparison.coverage_basis || "旧版结果未记录"} />
+          <Metric label="主视频输入" value={referenceComparison.source_width && referenceComparison.source_height ? `${referenceComparison.source_width}×${referenceComparison.source_height}` : "—"} detail={`${referenceComparison.source_pixel_format ?? "像素格式未知"} · ${referenceComparison.source_frame_rate ?? "帧率未知"}`} />
+          <Metric label="参考视频输入" value={referenceComparison.reference_width && referenceComparison.reference_height ? `${referenceComparison.reference_width}×${referenceComparison.reference_height}` : "—"} detail={`${referenceComparison.reference_pixel_format ?? "像素格式未知"} · ${referenceComparison.reference_frame_rate ?? "帧率未知"}`} />
+          <Metric label="比较格式" value={referenceComparison.comparison_pixel_format || "旧版结果未记录"} detail={referenceComparison.alignment_method || "对齐方式未记录"} />
+          <Metric label="内容对齐偏移" value={formatDuration(referenceComparison.detected_offset_ms)} detail={`置信度 ${referenceComparison.alignment_confidence_percent ?? 0}% · 指纹误差 ${referenceComparison.alignment_error_milli == null ? "—" : (referenceComparison.alignment_error_milli / 1000).toFixed(3)}`} />
+        </div>
+        <p className="capture-note">{referenceComparison.method}</p>
+        {referenceComparison.limitations.map((item) => <p className="capture-note" key={item}>{item}</p>)}
+        {referenceDifference && <video className="preview-player" controls preload="metadata" src={referenceDifference} />}
+      </>}
+      {referenceError && <p className="deep-frame-error">{referenceError}</p>}
+    </div>
+    {frame ? <>
+      <div className="frame-navigator">
+        <button type="button" disabled={selectedIndex === 0} onClick={() => choose(selectedIndex - 1)}>上一帧</button>
+        <label>显示帧 <input type="number" min={0} max={analysis.frames.length - 1} value={selectedIndex} onChange={(event) => choose(Number(event.target.value))} /> / {analysis.frames.length - 1}</label>
+        <button type="button" disabled={selectedIndex + 1 >= analysis.frames.length} onClick={() => choose(selectedIndex + 1)}>下一帧</button>
+      </div>
+      {nalus.some((nalu) => nalu.packets.length > 0) && <div className="packet-frame-lookup">
+        <label>抓包号反查帧 <input type="number" min={1} value={packetLookup} placeholder="例如 1205" onChange={(event) => setPacketLookup(event.target.value)} /></label>
+        {packetLookup && packetMatches.length === 0 && <span>该抓包号不属于当前流已保留的 NALU。</span>}
+        {packetMatches.map((nalu) => {
+          const mapped = nalu.access_unit_number == null ? undefined : analysis.frames.find((item) => item.decode_index === nalu.access_unit_number! - 1);
+          return <button type="button" key={nalu.nalu_number} disabled={!mapped} onClick={() => mapped && choose(mapped.display_index)}>NALU #{nalu.nalu_number} · AU #{nalu.access_unit_number ?? "—"}{mapped ? ` · 显示帧 #${mapped.display_index}` : " · 无可靠显示帧映射"}</button>;
+        })}
+      </div>}
+      <div className="gop-strip" aria-label="前 1000 帧 GOP 图">
+        {visibleFrames.map((item) => <button type="button" title={`#${item.display_index} ${item.picture_type ?? "?"} ${formatDuration(item.pts_ms)}`} className={`${item.picture_type?.toLowerCase() ?? "unknown"} ${item.key_frame ? "key" : ""} ${item.display_index === selectedIndex ? "selected" : ""}`} key={item.display_index} onClick={() => choose(item.display_index)} />)}
+      </div>
+      {analysis.frames.length > visibleFrames.length && <p className="capture-note">GOP 条带仅绘制前 1,000 帧；帧号输入与下表仍可定位全部已索引帧。</p>}
+      <div className="selected-frame-card">
+        <div><span>显示序号</span><strong>#{frame.display_index}</strong></div>
+        <div><span>编码序号</span><strong>{frame.decode_index ?? "—"}</strong><small>{frame.decode_index_precision}</small></div>
+        <div><span>帧型</span><strong>{frame.picture_type ?? "—"}{frame.key_frame ? " · Key" : ""}</strong></div>
+        <div><span>PTS / DTS</span><strong>{formatDuration(frame.pts_ms)} / {formatDuration(frame.dts_ms)}</strong></div>
+        <div><span>包位置 / 大小</span><strong>{frame.packet_position ?? "—"} / {frame.packet_size ?? "—"} B</strong></div>
+        <div><span>扫描方式</span><strong>{frame.interlaced == null ? "未知" : frame.interlaced ? `隔行${frame.top_field_first == null ? "" : frame.top_field_first ? " · TFF" : " · BFF"}` : "逐行"}</strong></div>
+      </div>
+      <div className="exact-frame-viewer">
+        <div><strong>精确帧画面</strong><span>按显示序号从本次原始视频源解码，不使用预览视频 currentTime 近似定位。</span></div>
+        <button type="button" disabled={frameImageLoading} onClick={() => { void loadFrameImage(); }}>{frameImageLoading ? "正在提取…" : `加载第 ${selectedIndex} 帧`}</button>
+        <button type="button" disabled={blockLoading} onClick={() => { void loadBlockData(); }}>{blockLoading ? "正在分析块数据…" : "加载 QP / 运动矢量"}</button>
+        <button type="button" disabled={syntaxLoading} onClick={() => { void loadSyntax(); }}>{syntaxLoading ? "正在读取语法…" : "加载语法树 / HEX"}</button>
+        <button type="button" disabled={blockExporting} onClick={() => { void exportBlockCsv(); }}>{blockExporting ? "正在导出…" : "导出块数据 CSV"}</button>
+        {blockFrame && <div className="block-layer-controls">
+          <label><input type="checkbox" checked={showQp} onChange={(event) => setShowQp(event.target.checked)} />QP 热力图</label>
+          <label><input type="checkbox" checked={showMotion} onChange={(event) => setShowMotion(event.target.checked)} />运动矢量</label>
+          <label>块边界 <select value={blockLayer} onChange={(event) => setBlockLayer(event.target.value)}>
+            <option value="">关闭</option>
+            {codec.toLowerCase().includes("264") ? <option value="h264_macroblock">H.264 宏块</option> : <>
+              <option value="hevc_ctu">HEVC CTU</option>
+              <option value="hevc_cu">HEVC 叶子 CU</option>
+              <option value="hevc_pu">HEVC PU</option>
+              <option value="hevc_tu">HEVC 叶子 TU</option>
+            </>}
+          </select></label>
+          <span>QP {blockFrame.qp?.blocks.length.toLocaleString() ?? 0} 块{qpStats ? ` · min ${qpStats.minimum} / avg ${qpStats.average.toFixed(2)} / max ${qpStats.maximum}` : ""} · MV {blockFrame.motion_vectors.length.toLocaleString()} 条{displayedVectors.length < blockFrame.motion_vectors.length ? `（显示抽样 ${displayedVectors.length.toLocaleString()} 条）` : ""}</span>
+          {blockFrame.analyzer_version && <span>{blockFrame.analyzer_version}</span>}
+          <span>内部块证据 {internalBlocks.length.toLocaleString()} 条 · HEVC 运动采样 {internalMotion.length.toLocaleString()} 条{hevcTreeCounts && ` · ${hevcTreeCounts}`}</span>
+          {displayedLayerBlocks.length < selectedLayerBlocks.length && <span>块边界抽样显示 {displayedLayerBlocks.length.toLocaleString()} / {selectedLayerBlocks.length.toLocaleString()} 条；CSV 保留全部</span>}
+          <span className="qp-color-legend"><i />低 QP <b />高 QP</span>
+        </div>}
+        {frameImage && <div className="video-block-canvas">
+          <img src={frameImage} alt={`显示帧 ${selectedIndex}`} />
+          {blockFrame && <svg viewBox={`0 0 ${blockFrame.width} ${blockFrame.height}`} role="img" aria-label={`第 ${selectedIndex} 帧 QP 与运动矢量覆盖层`}>
+            {showQp && blockFrame.qp?.blocks.map((block, index) => <rect key={`qp-${index}`} x={block.x} y={block.y} width={block.width} height={block.height} fill={qpColor(block.value)} fillOpacity="0.42" stroke="rgba(255,255,255,.18)" strokeWidth="0.35" onClick={() => setSelectedBlockDetail(`QP 块 #${index}：QP ${block.value}（base ${blockFrame.qp?.base}, delta ${block.delta}），坐标 ${block.x},${block.y}，尺寸 ${block.width}×${block.height}`)}><title>{`QP ${block.value}（base ${blockFrame.qp?.base}, delta ${block.delta}）· x=${block.x}, y=${block.y}, ${block.width}×${block.height}`}</title></rect>)}
+            {displayedLayerBlocks.map((block, index) => <rect key={`tree-${block.block_level}-${index}`} x={block.x} y={block.y} width={block.width} height={block.height} fill="transparent" stroke={block.block_level === "hevc_ctu" ? "#ffbd3d" : block.block_level === "hevc_cu" ? "#00f0ff" : block.block_level === "hevc_pu" ? "#ff4fd8" : block.block_level === "hevc_tu" ? "#8cff66" : "#ffffff"} strokeWidth={block.block_level === "hevc_ctu" ? 1.8 : 1} vectorEffect="non-scaling-stroke" onClick={() => setSelectedBlockDetail(`${block.block_level}：坐标 ${block.x},${block.y}，尺寸 ${block.width}×${block.height}，分区 ${block.partition_mode ?? "不适用"}，预测 ${block.prediction_mode ?? "不适用"}，深度 ${block.tree_depth ?? "未知"}${block.transform_flags == null ? "" : `，CBF ${block.transform_flags & 1 ? "Y" : "-"}/${block.transform_flags & 2 ? "Cb" : "-"}/${block.transform_flags & 4 ? "Cr" : "-"}`}`)}><title>{`${block.block_level} · ${block.width}×${block.height} · ${block.partition_mode ?? block.prediction_mode ?? ""}`}</title></rect>)}
+            {showMotion && displayedVectors.map((vector, index) => <line key={`mv-${index}`} x1={vector.destination_x} y1={vector.destination_y} x2={vector.source_x} y2={vector.source_y} stroke={vector.source_direction < 0 ? "#00f0ff" : "#ffbd3d"} strokeWidth="1.2" vectorEffect="non-scaling-stroke" onClick={() => setSelectedBlockDetail(`MV #${index}：参考方向 ${vector.source_direction}，目标 (${vector.destination_x},${vector.destination_y}) → 源 (${vector.source_x},${vector.source_y})，原始 (${vector.motion_x},${vector.motion_y}) / scale ${vector.motion_scale}，块 ${vector.width}×${vector.height}`)}><title>{`参考方向 ${vector.source_direction} · (${vector.destination_x},${vector.destination_y}) → (${vector.source_x},${vector.source_y}) · raw (${vector.motion_x},${vector.motion_y})/${vector.motion_scale}`}</title></line>)}
+          </svg>}
+        </div>}
+        {selectedBlockDetail && <p className="selected-block-detail">{selectedBlockDetail}</p>}
+        {blockFrame && !blockFrame.qp && <p className="deep-warning">该帧的解码器没有导出可验证的块级 QP；软件不会用 0 或推测值填充。</p>}
+        {blockFrame && blockFrame.motion_vectors.length === 0 && <p className="capture-note">该帧没有导出运动矢量（I 帧或当前解码器不提供此 side data）。</p>}
+        {blockFrame && internalBlocks.length > 0 && <details className="block-internal-evidence">
+          <summary>解码器内部块证据（显示前 200 条）</summary>
+          <p className="capture-note">H.264 记录实际宏块与子宏块分区及参考关系；HEVC 的 QP 网格单独显示，内部证据只列出解码器实际 CTU、叶子 CU、PU 和有变换语法的叶子 TU，避免重复输出最小网格。TU 的 CBF 位为 Y/Cb/Cr；无残差或 PCM CU 不伪造 TU。</p>
+          <div className="frame-index-table">
+            <div className="table-head"><span>层级</span><span>坐标/尺寸</span><span>QP/类型位</span><span>L0</span><span>L1</span><span>MV</span></div>
+            {internalBlocks.slice(0, 200).map((block, index) => <button type="button" key={`${block.block_level}-${block.x}-${block.y}-${index}`} onClick={() => setSelectedBlockDetail(`${block.block_level} @ ${block.x},${block.y} ${block.width}×${block.height}；QP ${block.qp ?? "未知"}；分区 ${block.partition_mode ?? "不适用"}${(block.sub_partition_modes ?? []).some(Boolean) ? `；子分区 [${(block.sub_partition_modes ?? []).map((value) => value ?? "—").join(",")}]` : ""}${block.prediction_mode ? `；预测 ${block.prediction_mode}` : ""}${block.tree_depth != null ? `；深度 ${block.tree_depth}` : ""}${block.transform_flags != null ? `；CBF Y/Cb/Cr ${block.transform_flags & 1 ? 1 : 0}/${block.transform_flags & 2 ? 1 : 0}/${block.transform_flags & 4 ? 1 : 0}` : ""}；type 0x${block.type_flags.toString(16)}；L0 [${block.ref_index_l0.join(",")}] POC [${block.reference_poc_l0.map((value) => value ?? "未知").join(",")}]；L1 [${block.ref_index_l1.join(",")}] POC [${block.reference_poc_l1.map((value) => value ?? "未知").join(",")}]`)}>
+              <span>{block.block_level}{block.partition_mode ? ` · ${block.partition_mode}${(block.sub_partition_modes ?? []).some(Boolean) ? ` [${(block.sub_partition_modes ?? []).map((value) => value ?? "—").join(",")}]` : ""}` : ""}{block.prediction_mode ? ` · ${block.prediction_mode}` : ""}{block.tree_depth != null ? ` · d${block.tree_depth}` : ""}</span><span>{block.x},{block.y} / {block.width}×{block.height}</span><span>{block.qp ?? "—"} / 0x{block.type_flags.toString(16)}</span><span>{block.ref_index_l0.join(",")} / POC {block.reference_poc_l0.map((value) => value ?? "—").join(",")}</span><span>{block.ref_index_l1.join(",")} / POC {block.reference_poc_l1.map((value) => value ?? "—").join(",")}</span><code>L0 {block.motion_l0_x ?? "—"},{block.motion_l0_y ?? "—"} · L1 {block.motion_l1_x ?? "—"},{block.motion_l1_y ?? "—"}</code>
+            </button>)}
+          </div>
+        </details>}
+        {frameImageError && <p className="deep-frame-error">{frameImageError}</p>}
+      </div>
+      {syntax && syntaxNalu && <div className="syntax-workbench">
+        <div className="syntax-summary"><strong>访问单元 #{syntax.access_unit_index ?? "—"}</strong><span>{syntax.mapping_precision}</span></div>
+        <div className="syntax-nalu-tabs">{syntax.nalus.map((nalu, index) => <button type="button" className={index === syntaxNaluIndex ? "selected" : ""} key={nalu.index} onClick={() => setSyntaxNaluIndex(index)}>NALU #{nalu.index} · {nalu.type_name} ({nalu.size} B) · RTP {nalu.packets.length}</button>)}</div>
+        <div className="syntax-columns">
+          <div className="syntax-tree"><h4>字段</h4>{syntaxNalu.fields.map((field) => <div key={`${field.source}-${field.name}`}><code>{field.name}</code><strong>{field.value}</strong><span>{field.source}</span></div>)}<h4>RTP 包映射 · {syntaxNalu.complete == null ? "离线文件" : syntaxNalu.complete ? "NALU 完整" : "NALU 不完整"}</h4>{syntaxNalu.packets.length === 0 ? <p className="syntax-empty">该输入没有包级来源信息。</p> : syntaxNalu.packets.map((packet) => <div key={`${packet.packet_number}-${packet.rtp_sequence}`}><code>抓包 #{packet.packet_number}</code><strong>Seq {packet.rtp_sequence}</strong><span>到达偏移 {packet.offset_ms} ms</span></div>)}</div>
+          <div className="syntax-hex"><h4>HEX · offset {syntaxNalu.offset}</h4><pre>{syntaxNalu.hex}</pre>{syntaxNalu.hex_truncated && <p>仅显示前 4,096 字节，原始 NALU 未被截断。</p>}</div>
+        </div>
+        <div className="syntax-limitations">{syntax.limitations.map((item) => <p key={item}>{item}</p>)}</div>
+      </div>}
+      <div className="frame-index-table">
+        <div className="table-head"><span>显示序号</span><span>编码序号</span><span>类型</span><span>PTS</span><span>DTS</span><span>字节位置 / 大小</span></div>
+        {tableFrames.map((item) => <button type="button" className={item.display_index === selectedIndex ? "selected" : ""} key={item.display_index} onClick={() => choose(item.display_index)}>
+          <span>#{item.display_index}</span><span>{item.decode_index ?? "—"}</span><strong>{item.picture_type ?? "—"}{item.key_frame ? " · K" : ""}</strong><span>{formatDuration(item.pts_ms)}</span><span>{formatDuration(item.dts_ms)}</span><code>{item.packet_position ?? "—"} / {item.packet_size ?? "—"} B</code>
+        </button>)}
+      </div>
+    </> : <div className="protocol-empty">ffprobe 没有返回可索引的视频帧。</div>}
+    <div className="deep-limitations"><h4>当前能力边界</h4>{analysis.limitations.map((item) => <p key={item}>{item}</p>)}</div>
+  </div>;
 }
 
 function TimelineChart({ events }: { events: AnalysisRun["result"]["timeline"] }) {

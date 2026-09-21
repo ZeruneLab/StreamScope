@@ -1,7 +1,11 @@
 use std::collections::BTreeSet;
-use streamscope_core::{H264FrameEvidence, H264Issue, H265Analysis, H265PpsInfo, H265SpsInfo};
+use streamscope_core::{
+    H264FrameEvidence, H264Issue, H265Analysis, H265PpsInfo, H265SpsInfo, VideoNaluEvidence,
+    VideoParameterChange, VideoSyntaxField, VideoSyntaxNalu,
+};
 
 const MAX_FRAME_EVIDENCE: usize = 50_000;
+const MAX_NALU_EVIDENCE: usize = 100_000;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Nalu {
@@ -262,11 +266,192 @@ pub fn split_annex_b(input: &[u8]) -> Vec<Nalu> {
         .collect()
 }
 
+pub fn inspect_annex_b_range(
+    input: &[u8],
+    first_nalu: u64,
+    last_nalu: u64,
+) -> Vec<VideoSyntaxNalu> {
+    const MAX_HEX_BYTES: usize = 4_096;
+    annex_b_ranges(input)
+        .into_iter()
+        .enumerate()
+        .filter_map(|(position, (offset, end))| {
+            let index = position as u64 + 1;
+            if index < first_nalu || index > last_nalu || end < offset + 2 {
+                return None;
+            }
+            let data = &input[offset..end];
+            let kind = (data[0] >> 1) & 0x3f;
+            let mut fields = vec![
+                syntax_field("forbidden_zero_bit", data[0] >> 7, "NALU header"),
+                syntax_field("nal_unit_type", kind, "NALU header"),
+                syntax_field(
+                    "nuh_layer_id",
+                    ((data[0] & 1) << 5) | (data[1] >> 3),
+                    "NALU header",
+                ),
+                syntax_field("nuh_temporal_id_plus1", data[1] & 7, "NALU header"),
+            ];
+            match kind {
+                33 => match parse_sps(data) {
+                    Ok(sps) => {
+                        fields.extend([
+                            syntax_field("sps_seq_parameter_set_id", sps.id, "SPS RBSP"),
+                            syntax_field("sps_video_parameter_set_id", sps.vps_id, "SPS RBSP"),
+                            syntax_field("max_sub_layers", sps.max_sub_layers, "SPS RBSP"),
+                            syntax_field("profile_idc", sps.profile_idc, "SPS RBSP"),
+                            syntax_field("level_idc", sps.level_idc, "SPS RBSP"),
+                            syntax_field("chroma_format_idc", sps.chroma_format_idc, "SPS RBSP"),
+                            syntax_field("bit_depth_luma", sps.bit_depth_luma, "SPS RBSP"),
+                            syntax_field("bit_depth_chroma", sps.bit_depth_chroma, "SPS RBSP"),
+                            syntax_field("width", sps.width, "SPS RBSP"),
+                            syntax_field("height", sps.height, "SPS RBSP"),
+                        ]);
+                        if let Some(value) = sps.max_dec_pic_buffering {
+                            fields.push(syntax_field(
+                                "sps_max_dec_pic_buffering",
+                                value,
+                                "SPS sub-layer ordering",
+                            ));
+                        }
+                        if let Some(value) = sps.max_num_reorder_pics {
+                            fields.push(syntax_field(
+                                "sps_max_num_reorder_pics",
+                                value,
+                                "SPS sub-layer ordering",
+                            ));
+                        }
+                    }
+                    Err(error) => fields.push(syntax_field("parse_error", error, "SPS parser")),
+                },
+                34 => match parse_pps(data) {
+                    Ok(pps) => fields.extend([
+                        syntax_field("pps_pic_parameter_set_id", pps.id, "PPS RBSP"),
+                        syntax_field("pps_seq_parameter_set_id", pps.sps_id, "PPS RBSP"),
+                    ]),
+                    Err(error) => fields.push(syntax_field("parse_error", error, "PPS parser")),
+                },
+                0..=31 => match parse_slice_prefix(data) {
+                    Ok(slice) => {
+                        fields.push(syntax_field(
+                            "first_slice_segment_in_pic_flag",
+                            u8::from(slice.first_slice_segment_in_pic),
+                            "Slice segment header",
+                        ));
+                        if let Some(value) = slice.no_output_of_prior_pics {
+                            fields.push(syntax_field(
+                                "no_output_of_prior_pics_flag",
+                                u8::from(value),
+                                "Slice segment header",
+                            ));
+                        }
+                        fields.push(syntax_field(
+                            "slice_pic_parameter_set_id",
+                            slice.pps_id,
+                            "Slice segment header",
+                        ));
+                    }
+                    Err(error) => fields.push(syntax_field(
+                        "parse_error",
+                        error,
+                        "Slice segment header parser",
+                    )),
+                },
+                _ => {}
+            }
+            Some(VideoSyntaxNalu {
+                index,
+                offset: offset as u64,
+                size: data.len() as u64,
+                nalu_type: kind,
+                type_name: nalu_type_name(kind).into(),
+                fields,
+                hex: hex_dump(data, offset, MAX_HEX_BYTES),
+                hex_truncated: data.len() > MAX_HEX_BYTES,
+                complete: None,
+                access_unit_number: None,
+                packets: Vec::new(),
+            })
+        })
+        .collect()
+}
+
+fn annex_b_ranges(input: &[u8]) -> Vec<(usize, usize)> {
+    let mut starts = Vec::new();
+    let mut index = 0;
+    while index + 3 <= input.len() {
+        let length = if input[index..].starts_with(&[0, 0, 1]) {
+            3
+        } else if input[index..].starts_with(&[0, 0, 0, 1]) {
+            4
+        } else {
+            index += 1;
+            continue;
+        };
+        starts.push((index, length));
+        index += length;
+    }
+    starts
+        .iter()
+        .enumerate()
+        .filter_map(|(position, (start, length))| {
+            let data_start = start + length;
+            let data_end = starts
+                .get(position + 1)
+                .map(|value| value.0)
+                .unwrap_or(input.len());
+            (data_end >= data_start + 2).then_some((data_start, data_end))
+        })
+        .collect()
+}
+
+fn syntax_field(name: &str, value: impl ToString, source: &str) -> VideoSyntaxField {
+    VideoSyntaxField {
+        name: name.into(),
+        value: value.to_string(),
+        source: source.into(),
+    }
+}
+
+fn hex_dump(data: &[u8], base: usize, maximum: usize) -> String {
+    data.iter()
+        .take(maximum)
+        .collect::<Vec<_>>()
+        .chunks(16)
+        .enumerate()
+        .map(|(line, bytes)| {
+            format!(
+                "{:08X}  {}",
+                base + line * 16,
+                bytes
+                    .iter()
+                    .map(|byte| format!("{byte:02X}"))
+                    .collect::<Vec<_>>()
+                    .join(" ")
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
 pub fn analyze_annex_b(input: &[u8]) -> H265Analysis {
     analyze_nalus(split_annex_b(input), Vec::new())
 }
 
-pub fn analyze_nalus(nalus: Vec<Nalu>, mut issues: Vec<H264Issue>) -> H265Analysis {
+pub fn analyze_nalus(nalus: Vec<Nalu>, issues: Vec<H264Issue>) -> H265Analysis {
+    match analyze_nalu_results(
+        nalus.into_iter().map(Ok::<_, std::convert::Infallible>),
+        issues,
+    ) {
+        Ok(analysis) => analysis,
+        Err(never) => match never {},
+    }
+}
+
+pub fn analyze_nalu_results<I, E>(nalus: I, mut issues: Vec<H264Issue>) -> Result<H265Analysis, E>
+where
+    I: IntoIterator<Item = Result<Nalu, E>>,
+{
     let mut analysis = H265Analysis::default();
     let mut seen_vps = false;
     let mut sps_ids = BTreeSet::new();
@@ -274,7 +459,8 @@ pub fn analyze_nalus(nalus: Vec<Nalu>, mut issues: Vec<H264Issue>) -> H265Analys
     let mut frame_timestamps = BTreeSet::new();
     let mut frame_index = 0_u64;
     let mut irap_positions = Vec::new();
-    for (nalu_index, nalu) in nalus.iter().enumerate() {
+    for (nalu_index, nalu) in nalus.into_iter().enumerate() {
+        let nalu = nalu?;
         analysis.nalu_count += 1;
         if nalu.complete {
             analysis.complete_nalus += 1
@@ -282,11 +468,30 @@ pub fn analyze_nalus(nalus: Vec<Nalu>, mut issues: Vec<H264Issue>) -> H265Analys
             analysis.incomplete_nalus += 1
         }
         if nalu.data.len() < 2 {
-            issues.push(issue("h265_short_nalu", "H.265 NALU 少于 2 字节", nalu));
+            issues.push(issue("h265_short_nalu", "H.265 NALU 少于 2 字节", &nalu));
             continue;
         }
+        if analysis.nalus.len() < MAX_NALU_EVIDENCE {
+            let nalu_type = (nalu.data[0] >> 1) & 0x3f;
+            analysis.nalus.push(VideoNaluEvidence {
+                nalu_number: nalu_index as u64 + 1,
+                nalu_type,
+                type_name: nalu_type_name(nalu_type).into(),
+                complete: nalu.complete,
+                rtp_timestamp: nalu.timestamp,
+                first_sequence: nalu.start_sequence,
+                last_sequence: nalu.end_sequence,
+                ..VideoNaluEvidence::default()
+            });
+        } else {
+            analysis.nalu_evidence_truncated = true;
+        }
         if nalu.data[0] & 0x80 != 0 || nalu.data[1] & 7 == 0 {
-            issues.push(issue("h265_invalid_nalu_header", "H.265 NALU 头无效", nalu));
+            issues.push(issue(
+                "h265_invalid_nalu_header",
+                "H.265 NALU 头无效",
+                &nalu,
+            ));
         }
         let kind = (nalu.data[0] >> 1) & 0x3f;
         *analysis
@@ -302,19 +507,30 @@ pub fn analyze_nalus(nalus: Vec<Nalu>, mut issues: Vec<H264Issue>) -> H265Analys
                 Ok(sps) => {
                     sps_ids.insert(sps.id);
                     if let Some(existing) = analysis.sps.iter_mut().find(|item| item.id == sps.id) {
+                        let changed_fields = h265_sps_changes(existing, &sps);
                         if existing.width != sps.width || existing.height != sps.height {
                             issues.push(issue(
                                 "h265_resolution_changed",
                                 "H.265 SPS 分辨率发生变化",
-                                nalu,
+                                &nalu,
                             ));
                         }
+                        let parameter_id = sps.id;
                         *existing = sps;
+                        if !changed_fields.is_empty() {
+                            analysis.parameter_changes.push(VideoParameterChange {
+                                nalu_number: nalu_index as u64 + 1,
+                                effective_access_unit: Some(frame_index + 1),
+                                parameter_kind: "SPS".into(),
+                                parameter_id,
+                                changed_fields,
+                            });
+                        }
                     } else {
                         analysis.sps.push(sps);
                     }
                 }
-                Err(error) => issues.push(issue("h265_invalid_sps", error, nalu)),
+                Err(error) => issues.push(issue("h265_invalid_sps", error, &nalu)),
             },
             34 => match parse_pps(&nalu.data) {
                 Ok(pps) => {
@@ -322,25 +538,39 @@ pub fn analyze_nalus(nalus: Vec<Nalu>, mut issues: Vec<H264Issue>) -> H265Analys
                         issues.push(issue(
                             "h265_pps_missing_sps",
                             "H.265 PPS 引用了尚未出现的 SPS",
-                            nalu,
+                            &nalu,
                         ));
                     }
                     pps_ids.insert(pps.id);
                     if let Some(existing) = analysis.pps.iter_mut().find(|item| item.id == pps.id) {
+                        let changed_fields = h265_pps_changes(existing, &pps);
+                        let parameter_id = pps.id;
                         *existing = pps;
+                        if !changed_fields.is_empty() {
+                            analysis.parameter_changes.push(VideoParameterChange {
+                                nalu_number: nalu_index as u64 + 1,
+                                effective_access_unit: Some(frame_index + 1),
+                                parameter_kind: "PPS".into(),
+                                parameter_id,
+                                changed_fields,
+                            });
+                        }
                     } else {
                         analysis.pps.push(pps);
                     }
                 }
-                Err(error) => issues.push(issue("h265_invalid_pps", error, nalu)),
+                Err(error) => issues.push(issue("h265_invalid_pps", error, &nalu)),
             },
             0..=31 => {
-                let first_slice = parse_first_slice(&nalu.data).ok();
-                let starts_frame = first_slice.unwrap_or_else(|| {
-                    nalu.timestamp
-                        .map(|ts| frame_timestamps.insert(ts))
-                        .unwrap_or(true)
-                });
+                let slice_prefix = parse_slice_prefix(&nalu.data).ok();
+                let starts_frame = slice_prefix
+                    .as_ref()
+                    .map(|slice| slice.first_slice_segment_in_pic)
+                    .unwrap_or_else(|| {
+                        nalu.timestamp
+                            .map(|ts| frame_timestamps.insert(ts))
+                            .unwrap_or(true)
+                    });
                 if starts_frame {
                     frame_index += 1;
                     analysis.frame_count += 1;
@@ -376,7 +606,7 @@ pub fn analyze_nalus(nalus: Vec<Nalu>, mut issues: Vec<H264Issue>) -> H265Analys
                             sample_end_offset: None,
                             idr: irap,
                             complete: nalu.complete,
-                            boundary_confidence: if first_slice.is_some() {
+                            boundary_confidence: if slice_prefix.is_some() {
                                 "slice_header"
                             } else if nalu.timestamp.is_some() {
                                 "rtp_timestamp"
@@ -432,8 +662,23 @@ pub fn analyze_nalus(nalus: Vec<Nalu>, mut issues: Vec<H264Issue>) -> H265Analys
             timestamp: None,
         });
     }
+    let mut frame_cursor = 0;
+    for nalu in &mut analysis.nalus {
+        let nalu_number = nalu.nalu_number;
+        while analysis
+            .frames
+            .get(frame_cursor)
+            .is_some_and(|frame| frame.last_nalu < nalu_number)
+        {
+            frame_cursor += 1;
+        }
+        nalu.access_unit_number = analysis.frames.get(frame_cursor).and_then(|frame| {
+            (frame.first_nalu <= nalu_number && nalu_number <= frame.last_nalu)
+                .then_some(frame.frame_number)
+        });
+    }
     analysis.issues = issues;
-    analysis
+    Ok(analysis)
 }
 
 fn issue(kind: &str, detail: &str, nalu: &Nalu) -> H264Issue {
@@ -442,6 +687,48 @@ fn issue(kind: &str, detail: &str, nalu: &Nalu) -> H264Issue {
         detail: detail.into(),
         sequence: nalu.start_sequence,
         timestamp: nalu.timestamp,
+    }
+}
+
+fn h265_sps_changes(previous: &H265SpsInfo, current: &H265SpsInfo) -> Vec<String> {
+    let mut fields = Vec::new();
+    if (previous.width, previous.height) != (current.width, current.height) {
+        fields.push("resolution".into());
+    }
+    if previous.vps_id != current.vps_id {
+        fields.push("video_parameter_set_id".into());
+    }
+    if previous.max_sub_layers != current.max_sub_layers {
+        fields.push("max_sub_layers".into());
+    }
+    if previous.profile_idc != current.profile_idc {
+        fields.push("profile_idc".into());
+    }
+    if previous.level_idc != current.level_idc {
+        fields.push("level_idc".into());
+    }
+    if previous.chroma_format_idc != current.chroma_format_idc {
+        fields.push("chroma_format_idc".into());
+    }
+    if (previous.bit_depth_luma, previous.bit_depth_chroma)
+        != (current.bit_depth_luma, current.bit_depth_chroma)
+    {
+        fields.push("bit_depth".into());
+    }
+    if previous.max_dec_pic_buffering != current.max_dec_pic_buffering {
+        fields.push("max_dec_pic_buffering".into());
+    }
+    if previous.max_num_reorder_pics != current.max_num_reorder_pics {
+        fields.push("max_num_reorder_pics".into());
+    }
+    fields
+}
+
+fn h265_pps_changes(previous: &H265PpsInfo, current: &H265PpsInfo) -> Vec<String> {
+    if previous.sps_id != current.sps_id {
+        vec!["seq_parameter_set_id".into()]
+    } else {
+        Vec::new()
     }
 }
 
@@ -595,6 +882,28 @@ fn parse_sps(data: &[u8]) -> Result<H265SpsInfo, &'static str> {
         .ue()
         .map_err(|_| "H.265 chroma bit depth 无效")?
         .saturating_add(8) as u8;
+    bits.ue()
+        .map_err(|_| "H.265 log2_max_pic_order_cnt_lsb_minus4 无效")?;
+    let ordering_info_present = bits
+        .flag()
+        .map_err(|_| "H.265 sub-layer ordering 标志缺失")?;
+    let first_layer = if ordering_info_present {
+        0
+    } else {
+        max_sub_layers - 1
+    };
+    let mut max_dec_pic_buffering = None;
+    let mut max_num_reorder_pics = None;
+    for _ in first_layer..max_sub_layers {
+        max_dec_pic_buffering = Some(
+            bits.ue()
+                .map_err(|_| "H.265 max_dec_pic_buffering 无效")?
+                .saturating_add(1),
+        );
+        max_num_reorder_pics = Some(bits.ue().map_err(|_| "H.265 max_num_reorder_pics 无效")?);
+        bits.ue()
+            .map_err(|_| "H.265 max_latency_increase_plus1 无效")?;
+    }
     if width == 0 || height == 0 {
         return Err("H.265 SPS 分辨率为零");
     }
@@ -609,6 +918,8 @@ fn parse_sps(data: &[u8]) -> Result<H265SpsInfo, &'static str> {
         bit_depth_chroma,
         width,
         height,
+        max_dec_pic_buffering,
+        max_num_reorder_pics,
     })
 }
 
@@ -623,11 +934,30 @@ fn parse_pps(data: &[u8]) -> Result<H265PpsInfo, &'static str> {
     })
 }
 
-fn parse_first_slice(data: &[u8]) -> Result<bool, ParseError> {
+struct H265SlicePrefix {
+    first_slice_segment_in_pic: bool,
+    no_output_of_prior_pics: Option<bool>,
+    pps_id: u32,
+}
+
+fn parse_slice_prefix(data: &[u8]) -> Result<H265SlicePrefix, ParseError> {
     if data.len() < 3 {
         return Err(ParseError::End);
     }
-    Bits::new(&data[2..]).flag()
+    let kind = (data[0] >> 1) & 0x3f;
+    let mut bits = Bits::new(&data[2..]);
+    let first_slice_segment_in_pic = bits.flag()?;
+    let no_output_of_prior_pics = if (16..=23).contains(&kind) {
+        Some(bits.flag()?)
+    } else {
+        None
+    };
+    let pps_id = bits.ue()?;
+    Ok(H265SlicePrefix {
+        first_slice_segment_in_pic,
+        no_output_of_prior_pics,
+        pps_id,
+    })
 }
 
 #[cfg(test)]
@@ -679,5 +1009,63 @@ mod tests {
         assert_eq!(analysis.frame_count, 2);
         assert_eq!(analysis.idr_frames, 1);
         assert_eq!(analysis.frames.len(), 2);
+    }
+
+    #[test]
+    fn inspects_h265_header_fields_and_hex_offset() {
+        let input = [0, 0, 0, 1, 0x40, 0x01, 0xaa, 0, 0, 1, 0x44, 0x01, 0xbb];
+        let syntax = inspect_annex_b_range(&input, 1, 1);
+        assert_eq!(syntax.len(), 1);
+        assert_eq!(syntax[0].offset, 4);
+        assert_eq!(syntax[0].nalu_type, 32);
+        assert!(
+            syntax[0]
+                .fields
+                .iter()
+                .any(|field| field.name == "nuh_temporal_id_plus1" && field.value == "1")
+        );
+    }
+
+    #[test]
+    fn inspects_h265_irap_slice_prefix_without_claiming_full_slice_parse() {
+        let input = [0, 0, 1, 0x26, 0x01, 0xe0];
+        let syntax = inspect_annex_b_range(&input, 1, 1);
+        let fields = &syntax[0].fields;
+        assert!(fields.iter().any(|field| {
+            field.name == "first_slice_segment_in_pic_flag" && field.value == "1"
+        }));
+        assert!(
+            fields.iter().any(|field| {
+                field.name == "no_output_of_prior_pics_flag" && field.value == "1"
+            })
+        );
+        assert!(
+            fields
+                .iter()
+                .any(|field| { field.name == "slice_pic_parameter_set_id" && field.value == "0" })
+        );
+    }
+
+    #[test]
+    fn reports_h265_sps_parameter_changes_without_false_change() {
+        let previous = H265SpsInfo {
+            id: 0,
+            vps_id: 0,
+            max_sub_layers: 1,
+            profile_idc: 1,
+            level_idc: 120,
+            chroma_format_idc: 1,
+            width: 1920,
+            height: 1080,
+            bit_depth_luma: 8,
+            bit_depth_chroma: 8,
+            max_dec_pic_buffering: Some(6),
+            max_num_reorder_pics: Some(2),
+        };
+        let mut current = previous.clone();
+        assert!(h265_sps_changes(&previous, &current).is_empty());
+        current.bit_depth_luma = 10;
+        current.bit_depth_chroma = 10;
+        assert_eq!(h265_sps_changes(&previous, &current), ["bit_depth"]);
     }
 }

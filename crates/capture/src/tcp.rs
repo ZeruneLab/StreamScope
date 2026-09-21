@@ -156,6 +156,7 @@ pub(crate) enum Message {
     },
     Rtsp {
         text: String,
+        meta: FrameMeta,
     },
 }
 
@@ -246,6 +247,7 @@ impl Decoder {
                 }
                 output.push(Message::Rtsp {
                     text: String::from_utf8_lossy(&self.buffer[..header_end + length]).into_owned(),
+                    meta: self.spans.front().unwrap().1.clone(),
                 });
                 self.discard(header_end + length);
             } else {
@@ -283,6 +285,27 @@ impl Decoder {
     pub fn unfinished_bytes(&self) -> usize {
         self.buffer.len()
     }
+
+    pub fn finish_partial_rtsp(&mut self) -> Option<Message> {
+        if self.buffer.is_empty() || !starts_rtsp(&self.buffer) {
+            return None;
+        }
+        let text = String::from_utf8_lossy(&self.buffer);
+        if !text.to_ascii_lowercase().contains("cseq:")
+            || text.to_ascii_lowercase().contains("content-length:")
+        {
+            return None;
+        }
+        let meta = self.spans.front()?.1.clone();
+        let mut text = text.into_owned();
+        while text.ends_with('\r') || text.ends_with('\n') {
+            text.pop();
+        }
+        text.push_str("\r\nX-StreamScope-Truncated: true\r\n\r\n");
+        self.buffer.clear();
+        self.spans.clear();
+        Some(Message::Rtsp { text, meta })
+    }
 }
 
 fn starts_rtsp(bytes: &[u8]) -> bool {
@@ -301,6 +324,22 @@ fn starts_rtsp(bytes: &[u8]) -> bool {
     ]
     .iter()
     .any(|prefix| bytes.starts_with(prefix))
+}
+
+pub(crate) fn push_loose_rtsp(
+    decoder: &mut Decoder,
+    data: &[u8],
+    meta: &FrameMeta,
+) -> Vec<Message> {
+    decoder
+        .push(Chunk {
+            data: data.to_vec(),
+            meta: meta.clone(),
+            discontinuity: false,
+        })
+        .into_iter()
+        .filter(|message| matches!(message, Message::Rtsp { .. }))
+        .collect()
 }
 
 #[cfg(test)]
@@ -357,5 +396,25 @@ mod tests {
             })[..],
             [Message::Rtsp { .. }]
         ));
+    }
+
+    #[test]
+    fn preserves_status_and_cseq_from_truncated_response_header() {
+        let mut decoder = Decoder::default();
+        assert!(
+            decoder
+                .push(Chunk {
+                    data: b"RTSP/1.0 200 OK\r\nCSeq: 5\r\nSession: abc\r\n".to_vec(),
+                    meta: meta(1),
+                    discontinuity: false,
+                })
+                .is_empty()
+        );
+        let Some(Message::Rtsp { text, .. }) = decoder.finish_partial_rtsp() else {
+            panic!("expected partial RTSP message");
+        };
+        assert!(text.contains("RTSP/1.0 200 OK"));
+        assert!(text.contains("CSeq: 5"));
+        assert!(text.contains("X-StreamScope-Truncated: true"));
     }
 }
