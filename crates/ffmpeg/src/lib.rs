@@ -323,6 +323,23 @@ fn video_worker_command() -> Command {
     tool_command("video-worker")
 }
 
+#[cfg(windows)]
+fn video_worker_path(path: &Path) -> std::borrow::Cow<'_, Path> {
+    let value = path.as_os_str().to_string_lossy();
+    if let Some(path) = value.strip_prefix(r"\\?\UNC\") {
+        return std::borrow::Cow::Owned(std::path::PathBuf::from(format!(r"\\{path}")));
+    }
+    if let Some(path) = value.strip_prefix(r"\\?\") {
+        return std::borrow::Cow::Owned(std::path::PathBuf::from(path));
+    }
+    std::borrow::Cow::Borrowed(path)
+}
+
+#[cfg(not(windows))]
+fn video_worker_path(path: &Path) -> std::borrow::Cow<'_, Path> {
+    std::borrow::Cow::Borrowed(path)
+}
+
 pub fn analyze_video_frame_blocks(
     source: &Path,
     output: &Path,
@@ -331,8 +348,8 @@ pub fn analyze_video_frame_blocks(
 ) -> Result<VideoWorkerFrame, FfmpegError> {
     let mut command = video_worker_command();
     command
-        .arg(source)
-        .arg(output)
+        .arg(video_worker_path(source).as_ref())
+        .arg(video_worker_path(output).as_ref())
         .arg(display_index.to_string())
         .arg("1");
     let process = run_with_timeout(command, timeout, "video-worker")?;
@@ -2240,6 +2257,23 @@ fn clean_decode_log(log: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(windows)]
+    #[test]
+    fn video_worker_uses_regular_windows_paths() {
+        assert_eq!(
+            video_worker_path(Path::new(r"\\?\C:\reports\sample.h264")).as_ref(),
+            Path::new(r"C:\reports\sample.h264")
+        );
+        assert_eq!(
+            video_worker_path(Path::new(r"\\?\UNC\server\share\sample.h264")).as_ref(),
+            Path::new(r"\\server\share\sample.h264")
+        );
+        assert_eq!(
+            video_worker_path(Path::new(r"C:\reports\sample.h264")).as_ref(),
+            Path::new(r"C:\reports\sample.h264")
+        );
+    }
 
     fn write_test_wav(path: &Path) {
         let sample_rate = 8_000_u32;

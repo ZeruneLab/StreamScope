@@ -423,6 +423,20 @@ fn resolve_report_video_source(
     Ok((directory, source, result))
 }
 
+#[cfg(windows)]
+fn frontend_file_path(path: &Path) -> String {
+    let value = path.as_os_str().to_string_lossy();
+    if let Some(path) = value.strip_prefix(r"\\?\UNC\") {
+        return format!(r"\\{path}");
+    }
+    value.strip_prefix(r"\\?\").unwrap_or(&value).to_owned()
+}
+
+#[cfg(not(windows))]
+fn frontend_file_path(path: &Path) -> String {
+    path.display().to_string()
+}
+
 #[tauri::command]
 async fn extract_video_frame(
     app: tauri::AppHandle,
@@ -450,7 +464,7 @@ async fn extract_video_frame(
             )
             .map_err(|error| error.to_string())?;
         }
-        Ok(destination.display().to_string())
+        Ok(frontend_file_path(&destination))
     })
     .await
     .map_err(|error| format!("逐帧图像任务异常结束：{error}"))?
@@ -722,6 +736,43 @@ fn inspect_selected_h265_nalus(
         .collect()
 }
 
+fn resolve_frame_access_unit<'a>(
+    indexed: &streamscope_core::VideoFrameIndex,
+    evidence: &'a [streamscope_core::H264FrameEvidence],
+) -> Result<(&'a streamscope_core::H264FrameEvidence, &'static str), String> {
+    if let Some(decode_index) = indexed.decode_index {
+        let access_unit_index = decode_index + 1;
+        return evidence
+            .iter()
+            .find(|frame| frame.frame_number == access_unit_index)
+            .map(|frame| (frame, "ffmpeg_coded_picture_number_to_parser_access_unit"))
+            .ok_or_else(|| "没有找到与该编码序号对应的访问单元证据".to_string());
+    }
+
+    let packet_start = indexed.packet_position.ok_or_else(|| {
+        "当前帧没有编码顺序号或码流字节位置，无法可靠地映射到访问单元".to_string()
+    })?;
+    let packet_end = packet_start
+        .checked_add(indexed.packet_size.ok_or_else(|| {
+            "当前帧没有编码顺序号或码流字节大小，无法可靠地映射到访问单元".to_string()
+        })?)
+        .ok_or_else(|| "当前帧的码流字节范围无效".to_string())?;
+    let mut matches = evidence.iter().filter(|frame| {
+        matches!(
+            (frame.sample_start_offset, frame.sample_end_offset),
+            (Some(start), Some(end))
+                if packet_start <= start && start < end && end == packet_end
+        )
+    });
+    let matched = matches
+        .next()
+        .ok_or_else(|| "当前帧的码流字节范围无法唯一映射到访问单元".to_string())?;
+    if matches.next().is_some() {
+        return Err("当前帧的码流字节范围匹配到多个访问单元，已拒绝猜测".into());
+    }
+    Ok((matched, "ffprobe_packet_byte_range_to_parser_access_unit"))
+}
+
 #[tauri::command]
 async fn load_video_frame_syntax(
     app: tauri::AppHandle,
@@ -748,19 +799,15 @@ async fn load_video_frame_syntax(
             .iter()
             .find(|frame| frame.display_index == display_index)
             .ok_or_else(|| "所选显示帧不在索引中".to_string())?;
-        let access_unit_index = indexed.decode_index.map(|index| index + 1).ok_or_else(|| {
-            "当前解码器没有返回编码顺序号，无法可靠地把显示帧映射到访问单元".to_string()
-        })?;
-        let evidence = result
+        let evidence_frames = result
             .h264
             .as_ref()
-            .and_then(|analysis| analysis.frames.iter().find(|frame| frame.frame_number == access_unit_index))
-            .or_else(|| {
-                result.h265.as_ref().and_then(|analysis| {
-                    analysis.frames.iter().find(|frame| frame.frame_number == access_unit_index)
-                })
-            })
-            .ok_or_else(|| "没有找到与该编码序号对应的访问单元证据".to_string())?;
+            .map(|analysis| analysis.frames.as_slice())
+            .or_else(|| result.h265.as_ref().map(|analysis| analysis.frames.as_slice()))
+            .ok_or_else(|| "当前报告没有访问单元证据".to_string())?;
+        let (evidence, mapping_precision) =
+            resolve_frame_access_unit(indexed, evidence_frames)?;
+        let access_unit_index = evidence.frame_number;
         let selected = read_annex_b_nalu_range(
             &source,
             evidence.first_nalu,
@@ -773,7 +820,7 @@ async fn load_video_frame_syntax(
                 inspect_selected_h264_nalus(&selected),
                 vec![
                     "字段树覆盖 NALU 头、SPS/PPS 和基础 Slice Header；不解析 Slice Data、CABAC/CAVLC 宏块语法。".into(),
-                    "显示帧到访问单元使用 FFmpeg coded_picture_number；无法取得时不会按显示序号猜测。".into(),
+                    "显示帧优先使用 FFmpeg coded_picture_number 映射；缺失时使用经过唯一性验证的码流字节范围，不按显示序号猜测。".into(),
                 ],
             )
         } else {
@@ -782,7 +829,7 @@ async fn load_video_frame_syntax(
                 inspect_selected_h265_nalus(&selected),
                 vec![
                     "字段树覆盖 NALU 头、SPS/PPS、Slice 起始标志、IRAP no-output 标志和 PPS ID；尚未覆盖完整 HEVC Slice Header。".into(),
-                    "显示帧到访问单元使用 FFmpeg coded_picture_number；CTU/CU/PU/TU 语法不在此基础树中。".into(),
+                    "显示帧优先使用 FFmpeg coded_picture_number 映射；缺失时使用经过唯一性验证的码流字节范围；CTU/CU/PU/TU 语法不在此基础树中。".into(),
                 ],
             )
         };
@@ -809,7 +856,7 @@ async fn load_video_frame_syntax(
             codec: codec.into(),
             display_index,
             access_unit_index: Some(access_unit_index),
-            mapping_precision: "ffmpeg_coded_picture_number_to_parser_access_unit".into(),
+            mapping_precision: mapping_precision.into(),
             nalus,
             limitations,
         })
@@ -1177,6 +1224,94 @@ mod tests {
     use streamscope_ffmpeg::{
         VideoBlockObservation, VideoMotionVector, VideoQpBlock, VideoQpData, VideoWorkerFrame,
     };
+
+    #[cfg(windows)]
+    #[test]
+    fn frontend_media_paths_do_not_use_the_verbatim_prefix() {
+        assert_eq!(
+            frontend_file_path(Path::new(r"\\?\C:\reports\frames\frame-0.png")),
+            r"C:\reports\frames\frame-0.png"
+        );
+        assert_eq!(
+            frontend_file_path(Path::new(r"\\?\UNC\server\share\frame-0.png")),
+            r"\\server\share\frame-0.png"
+        );
+    }
+
+    fn frame_evidence(
+        frame_number: u64,
+        sample_start_offset: u64,
+        sample_end_offset: u64,
+    ) -> streamscope_core::H264FrameEvidence {
+        streamscope_core::H264FrameEvidence {
+            frame_number,
+            rtp_timestamp: None,
+            first_sequence: None,
+            last_sequence: None,
+            first_nalu: frame_number,
+            last_nalu: frame_number,
+            first_packet: None,
+            last_packet: None,
+            first_offset_ms: None,
+            last_offset_ms: None,
+            sample_start_offset: Some(sample_start_offset),
+            sample_end_offset: Some(sample_end_offset),
+            idr: frame_number == 1,
+            complete: true,
+            boundary_confidence: "slice_header".into(),
+        }
+    }
+
+    #[test]
+    fn maps_frame_to_access_unit_by_unique_packet_byte_range() {
+        let indexed = streamscope_core::VideoFrameIndex {
+            display_index: 0,
+            decode_index: None,
+            decode_index_precision: "unavailable".into(),
+            packet_position: Some(0),
+            packet_size: Some(38_137),
+            ..Default::default()
+        };
+        let evidence = vec![
+            frame_evidence(1, 31, 38_137),
+            frame_evidence(2, 38_137, 39_285),
+        ];
+        let (matched, precision) = resolve_frame_access_unit(&indexed, &evidence).unwrap();
+        assert_eq!(matched.frame_number, 1);
+        assert_eq!(precision, "ffprobe_packet_byte_range_to_parser_access_unit");
+    }
+
+    #[test]
+    fn packet_byte_range_mapping_rejects_ambiguous_access_units() {
+        let indexed = streamscope_core::VideoFrameIndex {
+            packet_position: Some(0),
+            packet_size: Some(100),
+            ..Default::default()
+        };
+        let evidence = vec![frame_evidence(1, 0, 100), frame_evidence(2, 50, 100)];
+        assert!(
+            resolve_frame_access_unit(&indexed, &evidence)
+                .unwrap_err()
+                .contains("多个访问单元")
+        );
+    }
+
+    #[test]
+    fn coded_picture_number_mapping_keeps_priority() {
+        let indexed = streamscope_core::VideoFrameIndex {
+            decode_index: Some(1),
+            packet_position: Some(0),
+            packet_size: Some(100),
+            ..Default::default()
+        };
+        let evidence = vec![frame_evidence(1, 0, 100), frame_evidence(2, 100, 200)];
+        let (matched, precision) = resolve_frame_access_unit(&indexed, &evidence).unwrap();
+        assert_eq!(matched.frame_number, 2);
+        assert_eq!(
+            precision,
+            "ffmpeg_coded_picture_number_to_parser_access_unit"
+        );
+    }
 
     #[test]
     fn selected_syntax_reader_does_not_require_loading_the_whole_file() {

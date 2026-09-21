@@ -1302,6 +1302,8 @@ function VideoDeepAnalysisView({ analysis, nalus, parameterChanges, recoveryWind
   const [syntax, setSyntax] = useState<VideoSyntaxDocument | null>(null);
   const [syntaxNaluIndex, setSyntaxNaluIndex] = useState(0);
   const [syntaxLoading, setSyntaxLoading] = useState(false);
+  const [hexFontSize, setHexFontSize] = useState(11);
+  const [hexExpanded, setHexExpanded] = useState(false);
   const [packetLookup, setPacketLookup] = useState("");
   const [referenceComparison, setReferenceComparison] = useState<VideoReferenceComparison | null>(null);
   const [referenceDifference, setReferenceDifference] = useState("");
@@ -1319,7 +1321,7 @@ function VideoDeepAnalysisView({ analysis, nalus, parameterChanges, recoveryWind
     setSelectedIndex(Math.max(0, Math.min((analysis?.frames.length ?? 1) - 1, initialDisplayIndex)));
     setFrameImage(""); setFrameImageError(""); setFrameImageLoading(false);
     setBlockFrame(null); setBlockLoading(false); setSelectedBlockDetail("");
-    setSyntax(null); setSyntaxLoading(false);
+    setSyntax(null); setSyntaxLoading(false); setHexExpanded(false);
     setReferenceComparison(null); setReferenceDifference(""); setReferenceLoading(false); setReferenceError("");
   }, [analysis, initialDisplayIndex, reportDirectory, streamId]);
   useEffect(() => {
@@ -1346,7 +1348,7 @@ function VideoDeepAnalysisView({ analysis, nalus, parameterChanges, recoveryWind
     blockRequest.current += 1;
     syntaxRequest.current += 1;
     setFrameImageLoading(false); setBlockLoading(false); setSyntaxLoading(false);
-    setSelectedIndex(Math.max(0, Math.min(analysis.frames.length - 1, index))); setFrameImage(""); setFrameImageError(""); setBlockFrame(null); setSelectedBlockDetail(""); setSyntax(null); setSyntaxNaluIndex(0);
+    setSelectedIndex(Math.max(0, Math.min(analysis.frames.length - 1, index))); setFrameImage(""); setFrameImageError(""); setBlockFrame(null); setSelectedBlockDetail(""); setSyntax(null); setSyntaxNaluIndex(0); setHexExpanded(false);
   };
   const loadFrameImage = async () => {
     const request = ++frameImageRequest.current;
@@ -1540,7 +1542,7 @@ function VideoDeepAnalysisView({ analysis, nalus, parameterChanges, recoveryWind
         <button type="button" disabled={blockExporting} onClick={() => { void exportBlockCsv(); }}>{blockExporting ? "正在导出…" : "导出块数据 CSV"}</button>
         {blockFrame && <div className="block-layer-controls">
           <label><input type="checkbox" checked={showQp} onChange={(event) => setShowQp(event.target.checked)} />QP 热力图</label>
-          <label><input type="checkbox" checked={showMotion} onChange={(event) => setShowMotion(event.target.checked)} />运动矢量</label>
+          <label title={blockFrame.motion_vectors.length === 0 ? "I 帧或当前解码器未提供运动矢量" : "显示或隐藏运动矢量"}><input type="checkbox" checked={showMotion && blockFrame.motion_vectors.length > 0} disabled={blockFrame.motion_vectors.length === 0} onChange={(event) => setShowMotion(event.target.checked)} />运动矢量{blockFrame.motion_vectors.length === 0 ? "（当前帧无数据）" : ""}</label>
           <label>块边界 <select value={blockLayer} onChange={(event) => setBlockLayer(event.target.value)}>
             <option value="">关闭</option>
             {codec.toLowerCase().includes("264") ? <option value="h264_macroblock">H.264 宏块</option> : <>
@@ -1557,7 +1559,7 @@ function VideoDeepAnalysisView({ analysis, nalus, parameterChanges, recoveryWind
           <span className="qp-color-legend"><i />低 QP <b />高 QP</span>
         </div>}
         {frameImage && <div className="video-block-canvas">
-          <img src={frameImage} alt={`显示帧 ${selectedIndex}`} />
+          <img src={frameImage} alt={`显示帧 ${selectedIndex}`} onError={() => { setFrameImage(""); setFrameImageError("帧图像加载失败，请重新加载该帧。"); }} />
           {blockFrame && <svg viewBox={`0 0 ${blockFrame.width} ${blockFrame.height}`} role="img" aria-label={`第 ${selectedIndex} 帧 QP 与运动矢量覆盖层`}>
             {showQp && blockFrame.qp?.blocks.map((block, index) => <rect key={`qp-${index}`} x={block.x} y={block.y} width={block.width} height={block.height} fill={qpColor(block.value)} fillOpacity="0.42" stroke="rgba(255,255,255,.18)" strokeWidth="0.35" onClick={() => setSelectedBlockDetail(`QP 块 #${index}：QP ${block.value}（base ${blockFrame.qp?.base}, delta ${block.delta}），坐标 ${block.x},${block.y}，尺寸 ${block.width}×${block.height}`)}><title>{`QP ${block.value}（base ${blockFrame.qp?.base}, delta ${block.delta}）· x=${block.x}, y=${block.y}, ${block.width}×${block.height}`}</title></rect>)}
             {displayedLayerBlocks.map((block, index) => <rect key={`tree-${block.block_level}-${index}`} x={block.x} y={block.y} width={block.width} height={block.height} fill="transparent" stroke={block.block_level === "hevc_ctu" ? "#ffbd3d" : block.block_level === "hevc_cu" ? "#00f0ff" : block.block_level === "hevc_pu" ? "#ff4fd8" : block.block_level === "hevc_tu" ? "#8cff66" : "#ffffff"} strokeWidth={block.block_level === "hevc_ctu" ? 1.8 : 1} vectorEffect="non-scaling-stroke" onClick={() => setSelectedBlockDetail(`${block.block_level}：坐标 ${block.x},${block.y}，尺寸 ${block.width}×${block.height}，分区 ${block.partition_mode ?? "不适用"}，预测 ${block.prediction_mode ?? "不适用"}，深度 ${block.tree_depth ?? "未知"}${block.transform_flags == null ? "" : `，CBF ${block.transform_flags & 1 ? "Y" : "-"}/${block.transform_flags & 2 ? "Cb" : "-"}/${block.transform_flags & 4 ? "Cr" : "-"}`}`)}><title>{`${block.block_level} · ${block.width}×${block.height} · ${block.partition_mode ?? block.prediction_mode ?? ""}`}</title></rect>)}
@@ -1582,9 +1584,9 @@ function VideoDeepAnalysisView({ analysis, nalus, parameterChanges, recoveryWind
       {syntax && syntaxNalu && <div className="syntax-workbench">
         <div className="syntax-summary"><strong>访问单元 #{syntax.access_unit_index ?? "—"}</strong><span>{syntax.mapping_precision}</span></div>
         <div className="syntax-nalu-tabs">{syntax.nalus.map((nalu, index) => <button type="button" className={index === syntaxNaluIndex ? "selected" : ""} key={nalu.index} onClick={() => setSyntaxNaluIndex(index)}>NALU #{nalu.index} · {nalu.type_name} ({nalu.size} B) · RTP {nalu.packets.length}</button>)}</div>
-        <div className="syntax-columns">
+        <div className={`syntax-columns${hexExpanded ? " hex-expanded" : ""}`}>
           <div className="syntax-tree"><h4>字段</h4>{syntaxNalu.fields.map((field) => <div key={`${field.source}-${field.name}`}><code>{field.name}</code><strong>{field.value}</strong><span>{field.source}</span></div>)}<h4>RTP 包映射 · {syntaxNalu.complete == null ? "离线文件" : syntaxNalu.complete ? "NALU 完整" : "NALU 不完整"}</h4>{syntaxNalu.packets.length === 0 ? <p className="syntax-empty">该输入没有包级来源信息。</p> : syntaxNalu.packets.map((packet) => <div key={`${packet.packet_number}-${packet.rtp_sequence}`}><code>抓包 #{packet.packet_number}</code><strong>Seq {packet.rtp_sequence}</strong><span>到达偏移 {packet.offset_ms} ms</span></div>)}</div>
-          <div className="syntax-hex"><h4>HEX · offset {syntaxNalu.offset}</h4><pre>{syntaxNalu.hex}</pre>{syntaxNalu.hex_truncated && <p>仅显示前 4,096 字节，原始 NALU 未被截断。</p>}</div>
+          <div className="syntax-hex"><div className="syntax-hex-heading"><h4>HEX · offset {syntaxNalu.offset}</h4><div><button type="button" disabled={hexFontSize <= 9} onClick={() => setHexFontSize((value) => Math.max(9, value - 1))} aria-label="缩小 HEX 字号">−</button><span>{hexFontSize}px</span><button type="button" disabled={hexFontSize >= 20} onClick={() => setHexFontSize((value) => Math.min(20, value + 1))} aria-label="放大 HEX 字号">＋</button><button type="button" onClick={() => setHexExpanded((value) => !value)}>{hexExpanded ? "恢复双栏" : "放大显示"}</button></div></div><pre style={{ fontSize: `${hexFontSize}px` }}>{syntaxNalu.hex}</pre>{syntaxNalu.hex_truncated && <p>仅显示前 4,096 字节，原始 NALU 未被截断。</p>}</div>
         </div>
         <div className="syntax-limitations">{syntax.limitations.map((item) => <p key={item}>{item}</p>)}</div>
       </div>}
