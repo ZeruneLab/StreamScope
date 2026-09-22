@@ -1086,21 +1086,28 @@ pub fn render_html(result: &AnalysisResult) -> String {
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>StreamScope 诊断报告</title>
   <style>
-    :root {{ color-scheme: light; font-family: system-ui, "Microsoft YaHei", sans-serif; }}
-    body {{ max-width: 960px; margin: 40px auto; padding: 0 24px; color: #172033; background: #f6f8fb; }}
-    header, section {{ background: white; border: 1px solid #dde3ec; border-radius: 12px; padding: 22px; margin: 16px 0; }}
-    h1, h2 {{ margin-top: 0; }} .status {{ color: #075985; font-weight: 700; }}
-    h3 {{ margin: 22px 0 8px; font-size: 15px; }}
-    dl {{ display: grid; grid-template-columns: 150px 1fr; gap: 9px 16px; }} dt {{ color: #526070; }} dd {{ margin: 0; }}
-    table {{ width: 100%; margin-top: 18px; border-collapse: collapse; font-size: 13px; }} th, td {{ padding: 9px; border-bottom: 1px solid #e5e9ef; text-align: left; }} th {{ color: #526070; background: #f7f9fb; }}
-    code {{ overflow-wrap: anywhere; }} li {{ margin: 8px 0; }}
-    .finding {{ border-left: 4px solid #f59e0b; background: #f8fafc; padding: 14px 18px; margin: 14px 0; }}
-    .finding > div {{ display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }} .finding h4 {{ margin-bottom: 4px; }}
-    .severity {{ border-radius: 999px; padding: 3px 8px; background: #fee2e2; font-size: 12px; }}
-    .timeline {{ list-style: none; padding: 0; }} .timeline li {{ display: grid; grid-template-columns: 90px 170px 1fr; gap: 12px; border-bottom: 1px solid #e5e9ef; padding: 10px 0; }}
-    .summary-grid {{ display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }} .summary-grid > div {{ padding: 14px; border: 1px solid #dde3ec; border-radius: 8px; background: #f8fafc; }}
-    .summary-grid span, .summary-grid small {{ display: block; color: #64748b; }} .summary-grid strong {{ display: block; margin: 7px 0; }} .good {{ color: #07805d; }} .bad {{ color: #b4232c; }}
-    .chart-svg {{ width: 100%; height: auto; border: 1px solid #e5e9ef; border-radius: 8px; background: #fbfcfd; }} .chart-line {{ fill: none; stroke: #1778cf; stroke-width: 2; }} .spectrogram-cell:hover {{ stroke: #fff; stroke-width: 1; }}
+    :root {{ color-scheme: light; }}
+    * {{ box-sizing: border-box; }}
+    body {{ max-width: 980px; margin: 0 auto; padding: 44px 28px 64px; color: #1d1d1f; background: #eef1f6; background-image: radial-gradient(1100px 620px at 88% -8%, rgba(201, 214, 255, 0.55), transparent 62%), radial-gradient(900px 560px at -12% 24%, rgba(227, 211, 255, 0.42), transparent 60%); font-family: Inter, "SF Pro Text", "Segoe UI", "Microsoft YaHei", sans-serif; font-size: 14px; line-height: 1.65; }}
+    header, section {{ background: rgba(255, 255, 255, 0.85); border: 1px solid rgba(15, 23, 42, 0.08); border-radius: 20px; padding: 26px 28px; margin: 18px 0; box-shadow: 0 1px 2px rgba(15, 23, 42, 0.04), 0 12px 28px -10px rgba(15, 23, 42, 0.14); }}
+    h1 {{ margin: 0 0 6px; font-size: 26px; letter-spacing: -0.02em; }} h2 {{ margin: 0 0 12px; font-size: 18px; letter-spacing: -0.01em; }}
+    h3 {{ margin: 22px 0 8px; font-size: 14.5px; }}
+    header p {{ margin: 4px 0; color: #54545a; }}
+    .status {{ display: inline-block; padding: 5px 14px; border-radius: 999px; background: rgba(10, 132, 255, 0.12); color: #0a84ff; font-weight: 700; font-size: 13px; }}
+    a {{ color: #0a84ff; }}
+    dl {{ display: grid; grid-template-columns: 150px 1fr; gap: 9px 16px; margin: 0; }} dt {{ color: #86868b; }} dd {{ margin: 0; }}
+    table {{ width: 100%; margin-top: 16px; border-collapse: collapse; font-size: 13px; }} th, td {{ padding: 10px 12px; border-bottom: 1px solid rgba(15, 23, 42, 0.07); text-align: left; vertical-align: top; }} th {{ color: #86868b; font-size: 11px; font-weight: 700; letter-spacing: 0.05em; text-transform: uppercase; background: rgba(15, 23, 42, 0.03); }}
+    code {{ overflow-wrap: anywhere; padding: 2px 7px; border-radius: 7px; background: rgba(15, 23, 42, 0.05); font-size: 12px; }} li {{ margin: 8px 0; }}
+    .executive {{ border: 1px solid rgba(10, 132, 255, 0.22); background: linear-gradient(160deg, rgba(10, 132, 255, 0.07), rgba(255, 255, 255, 0.92) 55%); }}
+    .table-scroll {{ overflow-x: auto; }}
+    .finding {{ border-left: 3px solid #ff9f0a; background: rgba(255, 159, 10, 0.06); border-radius: 0 14px 14px 0; padding: 14px 18px; margin: 14px 0; }}
+    .finding > div {{ display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }} .finding h4 {{ margin: 0 0 4px; }}
+    .severity {{ border-radius: 999px; padding: 3px 10px; background: rgba(255, 69, 58, 0.12); color: #d70015; font-size: 12px; font-weight: 600; }}
+    .timeline {{ list-style: none; padding: 0; margin: 0; }} .timeline li {{ display: grid; grid-template-columns: 90px 170px 1fr; gap: 12px; border-bottom: 1px solid rgba(15, 23, 42, 0.07); padding: 10px 0; }}
+    .summary-grid {{ display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }} .summary-grid > div {{ padding: 16px; border: 1px solid rgba(15, 23, 42, 0.08); border-radius: 14px; background: rgba(255, 255, 255, 0.7); }}
+    .summary-grid span, .summary-grid small {{ display: block; color: #86868b; }} .summary-grid strong {{ display: block; margin: 6px 0; font-size: 15px; }} .good {{ color: #248a3d; }} .bad {{ color: #d70015; }}
+    .chart-svg {{ width: 100%; height: auto; border: 1px solid rgba(15, 23, 42, 0.08); border-radius: 12px; background: rgba(255, 255, 255, 0.75); }} .chart-line {{ fill: none; stroke: #0a84ff; stroke-width: 2; }} .spectrogram-cell:hover {{ stroke: #fff; stroke-width: 1; }}
+    @media print {{ body {{ background: #fff; padding: 0; }} header, section {{ box-shadow: none; border-color: #dde3ec; break-inside: avoid; }} }}
   </style>
 </head>
 <body>
@@ -1737,7 +1744,7 @@ fn render_capture_overview(result: &AnalysisResult) -> String {
     format!(
         r#"<!doctype html>
 <html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>StreamScope 多流抓包报告</title>
-<style>:root {{color-scheme:light;font-family:system-ui,"Microsoft YaHei",sans-serif}}body {{margin:32px auto;padding:0 24px;max-width:1600px;color:#172033;background:#f6f8fb}}header,section {{background:white;border:1px solid #dde3ec;border-radius:12px;padding:22px;margin:16px 0}}h1,h2 {{margin-top:0}}a {{color:#075985}}dl {{display:grid;grid-template-columns:170px 1fr;gap:8px}}dd {{margin:0}}.table-scroll {{overflow-x:auto}}table {{width:100%;border-collapse:collapse;font-size:13px}}th,td {{padding:10px;text-align:left;vertical-align:top;border-bottom:1px solid #dde3ec}}th {{background:#f7f9fb;white-space:nowrap}}small {{display:block;color:#526070;margin-top:5px}}code {{overflow-wrap:anywhere}}li {{margin:8px 0}}</style></head>
+<style>:root {{color-scheme:light}}* {{box-sizing:border-box}}body {{margin:0 auto;padding:40px 28px 64px;max-width:1600px;color:#1d1d1f;background:#eef1f6;background-image:radial-gradient(1100px 620px at 88% -8%,rgba(201,214,255,0.55),transparent 62%),radial-gradient(900px 560px at -12% 24%,rgba(227,211,255,0.42),transparent 60%);font-family:Inter,"SF Pro Text","Segoe UI","Microsoft YaHei",sans-serif;font-size:14px;line-height:1.65}}header,section {{background:rgba(255,255,255,0.85);border:1px solid rgba(15,23,42,0.08);border-radius:20px;padding:26px 28px;margin:18px 0;box-shadow:0 1px 2px rgba(15,23,42,0.04),0 12px 28px -10px rgba(15,23,42,0.14)}}h1 {{margin:0 0 6px;font-size:26px;letter-spacing:-0.02em}}h2 {{margin:0 0 12px;font-size:18px}}header p {{margin:4px 0;color:#54545a}}a {{color:#0a84ff}}dl {{display:grid;grid-template-columns:170px 1fr;gap:8px;margin:0}}dt {{color:#86868b}}dd {{margin:0}}.table-scroll {{overflow-x:auto}}table {{width:100%;border-collapse:collapse;font-size:13px}}th,td {{padding:10px 12px;text-align:left;vertical-align:top;border-bottom:1px solid rgba(15,23,42,0.07)}}th {{background:rgba(15,23,42,0.03);color:#86868b;font-size:11px;font-weight:700;letter-spacing:0.05em;text-transform:uppercase;white-space:nowrap}}small {{display:block;color:#86868b;margin-top:5px}}code {{overflow-wrap:anywhere;padding:2px 7px;border-radius:7px;background:rgba(15,23,42,0.05);font-size:12px}}li {{margin:8px 0}}footer {{margin:18px 0;color:#86868b;font-size:12.5px}}@media print {{body {{background:#fff;padding:0}}header,section {{box-shadow:none;border-color:#dde3ec;break-inside:avoid}}}}</style></head>
 <body><header><h1>StreamScope 多流抓包报告</h1><p>{status} · 发现 {stream_count} 组媒体流</p><p>{generated_at}</p><p><a href="result.json">完整 JSON（含各流结果）</a></p></header>
 <section><h2>抓包总览</h2><dl><dt>来源</dt><dd><code>{source}</code></dd><dt>抓包覆盖时长</dt><dd>{duration}</dd><dt>总抓包帧数</dt><dd>{total}</dd><dt>已解析传输层帧</dt><dd>{parsed}</dd><dt>忽略 / 异常帧</dt><dd>{ignored} / {malformed}</dd></dl><p>各媒体流独立统计、重组和解码。传输方式、码率和可信度请逐流查看；总览不合并各流的序列、NALU 或视频帧。抓包中的序列缺口需结合捕获完整性核验。</p></section>
 <section><h2>媒体流列表</h2><div class="table-scroll"><table><thead><tr><th>流 / 详情</th><th>端点</th><th>SSRC / Channel</th><th>PT</th><th>编码 / 识别依据</th><th>传输</th><th>RTP 包</th><th>覆盖时长</th><th>平均码率</th><th>诊断项</th><th>执行状态</th><th>数据可信度</th></tr></thead><tbody>{rows}</tbody></table></div></section>

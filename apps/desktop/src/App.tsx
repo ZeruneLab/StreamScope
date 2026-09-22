@@ -1,7 +1,9 @@
-import { FormEvent, useEffect, useMemo, useRef, useState } from "react";
+import { FormEvent, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { convertFileSrc, invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
+import { getCurrentWindow } from "@tauri-apps/api/window";
 import { open, save } from "@tauri-apps/plugin-dialog";
+import { Activity, ArrowLeft, Cctv, FileVideo, Film, Maximize2, Minus, Music, Network, Play, X } from "lucide-react";
 import { CaptureStreams } from "./CaptureStreams";
 import OnvifDiagnostics from "./OnvifDiagnostics";
 import type {
@@ -91,6 +93,57 @@ function App() {
   const reportFrame = useRef<HTMLIFrameElement>(null);
   const previewVideo = useRef<HTMLVideoElement>(null);
   const previewAudio = useRef<HTMLAudioElement>(null);
+  const navRef = useRef<HTMLElement>(null);
+  const tabsRef = useRef<HTMLDivElement>(null);
+
+  const isDesktop = "__TAURI_INTERNALS__" in window;
+  // 切换输入源时清空上一模式的结果，保证每个入口的分析结果互不串台
+  function switchMode(mode: InputMode) {
+    if (mode === inputMode) return;
+    setInputMode(mode);
+    setOfflinePath("");
+    setRun(null);
+    setComparison(null);
+    setReportHtml("");
+    setProgress(null);
+    setError("");
+    setSelectedStreamId(null);
+    setExportMessage("");
+    setView("overview");
+  }
+
+  async function windowAction(action: "close" | "minimize" | "fullscreen") {
+    if (!isDesktop) return;
+    const win = getCurrentWindow();
+    if (action === "close") await win.close();
+    else if (action === "minimize") await win.minimize();
+    else await win.setFullscreen(!(await win.isFullscreen()));
+  }
+
+  // 滑动指示器：测量活动项位置并写入容器 CSS 变量
+  useLayoutEffect(() => {
+    const syncIndicator = (container: HTMLElement | null, selector: string) => {
+      if (!container) return;
+      const active = container.querySelector<HTMLElement>(selector);
+      if (!active) {
+        container.style.setProperty("--indicator-opacity", "0");
+        return;
+      }
+      container.style.setProperty("--indicator-x", `${active.offsetLeft}px`);
+      container.style.setProperty("--indicator-y", `${active.offsetTop}px`);
+      container.style.setProperty("--indicator-w", `${active.offsetWidth}px`);
+      container.style.setProperty("--indicator-h", `${active.offsetHeight}px`);
+      container.style.setProperty("--indicator-opacity", "1");
+    };
+    const syncAll = () => {
+      syncIndicator(navRef.current, ".nav-item.active");
+      syncIndicator(tabsRef.current, ".tabs button.active");
+    };
+    const frame = requestAnimationFrame(syncAll);
+    window.addEventListener("resize", syncAll);
+    return () => { cancelAnimationFrame(frame); window.removeEventListener("resize", syncAll); };
+  }, [inputMode, view, run]);
+
 
   useEffect(() => {
     invoke<RecentRun[]>("list_analysis_history").then(setHistory).catch(() => undefined);
@@ -445,6 +498,12 @@ function App() {
   return (
     <div className="app-shell">
       <aside className="sidebar">
+        <div className="traffic-lights" data-tauri-drag-region>
+          <button className="tl tl-close" type="button" title="关闭" aria-label="关闭窗口" onClick={() => { void windowAction("close"); }}><X size={9} strokeWidth={2.8} /></button>
+          <button className="tl tl-min" type="button" title="最小化" aria-label="最小化窗口" onClick={() => { void windowAction("minimize"); }}><Minus size={9} strokeWidth={2.8} /></button>
+          <button className="tl tl-max" type="button" title="全屏" aria-label="切换全屏" onClick={() => { void windowAction("fullscreen"); }}><Maximize2 size={8} strokeWidth={2.8} /></button>
+          <span className="drag-spacer" data-tauri-drag-region />
+        </div>
         <div className="brand">
           <span className="brand-mark" aria-hidden="true">
             <i />
@@ -457,24 +516,25 @@ function App() {
           </div>
         </div>
 
-        <nav aria-label="主导航">
-          <button className={`nav-item ${inputMode === "rtsp" ? "active" : ""}`} type="button" onClick={() => { setInputMode("rtsp"); setOfflinePath(""); }}>
-            <span className="nav-icon">⌁</span>实时分析
+        <nav aria-label="主导航" ref={navRef}>
+          <span className="nav-indicator" aria-hidden="true" />
+          <button className={`nav-item ${inputMode === "rtsp" ? "active" : ""}`} type="button" onClick={() => switchMode("rtsp")}>
+            <span className="nav-icon"><Activity size={17} strokeWidth={1.75} /></span>实时分析
           </button>
-          <button className={`nav-item ${inputMode === "h264" ? "active" : ""}`} type="button" onClick={() => { setInputMode("h264"); setOfflinePath(""); }}>
-            <span className="nav-icon">◇</span>H.264 文件
+          <button className={`nav-item ${inputMode === "h264" ? "active" : ""}`} type="button" onClick={() => switchMode("h264")}>
+            <span className="nav-icon"><FileVideo size={17} strokeWidth={1.75} /></span>H.264 文件
           </button>
-          <button className={`nav-item ${inputMode === "h265" ? "active" : ""}`} type="button" onClick={() => { setInputMode("h265"); setOfflinePath(""); }}>
-            <span className="nav-icon">◇</span>H.265 / HEVC
+          <button className={`nav-item ${inputMode === "h265" ? "active" : ""}`} type="button" onClick={() => switchMode("h265")}>
+            <span className="nav-icon"><Film size={17} strokeWidth={1.75} /></span>H.265 / HEVC
           </button>
-          <button className={`nav-item ${inputMode === "audio" ? "active" : ""}`} type="button" onClick={() => { setInputMode("audio"); setOfflinePath(""); }}>
-            <span className="nav-icon">♫</span>音频文件
+          <button className={`nav-item ${inputMode === "audio" ? "active" : ""}`} type="button" onClick={() => switchMode("audio")}>
+            <span className="nav-icon"><Music size={17} strokeWidth={1.75} /></span>音频文件
           </button>
-          <button className={`nav-item ${inputMode === "pcap" ? "active" : ""}`} type="button" onClick={() => { setInputMode("pcap"); setOfflinePath(""); }}>
-            <span className="nav-icon">◫</span>PCAP / PCAPNG
+          <button className={`nav-item ${inputMode === "pcap" ? "active" : ""}`} type="button" onClick={() => switchMode("pcap")}>
+            <span className="nav-icon"><Network size={17} strokeWidth={1.75} /></span>PCAP / PCAPNG
           </button>
-          <button className={`nav-item ${inputMode === "onvif" ? "active" : ""}`} type="button" onClick={() => { setInputMode("onvif"); setOfflinePath(""); }}>
-            <span className="nav-icon">◎</span>ONVIF 诊断
+          <button className={`nav-item ${inputMode === "onvif" ? "active" : ""}`} type="button" onClick={() => switchMode("onvif")}>
+            <span className="nav-icon"><Cctv size={17} strokeWidth={1.75} /></span>ONVIF 诊断
           </button>
         </nav>
 
@@ -484,7 +544,7 @@ function App() {
             <p className="history-empty">完成分析后，脱敏记录会显示在这里。</p>
           ) : (
             history.map((item, index) => (
-              <div className="history-row" key={`${item.generatedAt}-${index}`}>
+              <div className="history-row" key={`${item.generatedAt}-${index}`} style={{ animationDelay: `${Math.min(index * 45, 320)}ms` }}>
                 <button className="history-item" type="button" disabled={running} onClick={() => openHistory(item)} title="重新打开此报告">
                   <span className={`status-dot ${item.status}`} />
                   <div>
@@ -493,7 +553,7 @@ function App() {
                     {item.criticalCount > 0 && <small>{item.criticalCount} 项高风险</small>}
                   </div>
                 </button>
-                <button className="history-delete" type="button" disabled={running} onClick={() => deleteHistoryReport(item)} title="删除报告">×</button>
+                <button className="history-delete" type="button" disabled={running} onClick={() => deleteHistoryReport(item)} title="删除报告"><X size={13} strokeWidth={2} /></button>
               </div>
             ))
           )}
@@ -506,13 +566,13 @@ function App() {
       </aside>
 
       <main>
-        <header className="topbar">
-          <div>
+        <header className="topbar" data-tauri-drag-region>
+          <div data-tauri-drag-region>
             <p className="eyebrow">{inputMode === "onvif" ? "ONVIF DEVICE INSPECTOR" : "RTSP INSPECTOR"}</p>
             <h1>{inputMode === "onvif" ? "ONVIF 设备诊断" : inputMode === "pcap" ? "多流抓包诊断" : inputMode === "h264" ? "H.264 文件诊断" : inputMode === "h265" ? "H.265 文件诊断" : inputMode === "audio" ? "音频文件诊断" : "实时流诊断"}</h1>
             <p>{inputMode === "onvif" ? "按标准服务链验证设备能力，并把媒体入口交给现有 RTSP/RTP 分析器。" : inputMode === "pcap" ? "发现抓包中的媒体流，独立查看每路的网络与码流证据。" : "验证媒体参数与实际解码结果。"}</p>
           </div>
-          <div className={`health-pill ${health.className}`}>
+          <div className={`health-pill ${health.className} ${running ? "running" : ""}`}>
             <span />{health.label}
           </div>
         </header>
@@ -549,7 +609,7 @@ function App() {
             {inputMode === "rtsp" && <div className="form-grid">
               <fieldset className="field">
                 <legend>传输模式</legend>
-                <div className="segmented">
+                <div className={`segmented seg-${(["tcp", "udp", "compare"] as TransportMode[]).indexOf(transport)}`}>
                   {(["tcp", "udp", "compare"] as TransportMode[]).map((item) => (
                     <button
                       className={transport === item ? "selected" : ""}
@@ -597,7 +657,7 @@ function App() {
               {running ? (
                 <><span className="spinner" />正在分析…</>
               ) : (
-                <><span className="play-icon">▶</span>{inputMode === "rtsp" ? "开始诊断" : inputMode === "pcap" ? "扫描媒体流" : "分析文件"}</>
+                <>{inputMode === "rtsp" ? "开始诊断" : inputMode === "pcap" ? "扫描媒体流" : "分析文件"}<span className="play-icon"><Play size={15} strokeWidth={2.2} fill="currentColor" /></span></>
               )}
             </button>
             {running && <button className="cancel-analysis-button" type="button" disabled={cancelling} onClick={() => { void cancelCurrentAnalysis(); }}>{cancelling ? "正在停止…" : "取消分析"}</button>}
@@ -642,11 +702,12 @@ function App() {
               <>
                 {legacyCapture && <div className="capture-legacy" role="alert"><strong>旧版抓包报告尚未按媒体流分组</strong><p>多路数据可能混入同一份统计和码流，请重新选择原抓包并扫描后再判断丢包、分片或解码问题。</p></div>}
                 {identity && <div className="capture-selection">
-                  <button type="button" onClick={() => { setSelectedStreamId(null); setView("overview"); }}>← 所有媒体流（{capture?.stream_count}）</button>
+                  <button type="button" onClick={() => { setSelectedStreamId(null); setView("overview"); }}><ArrowLeft size={13} strokeWidth={2} />所有媒体流（{capture?.stream_count}）</button>
                   <div><strong>当前流：{identity.id}</strong><code>{identity.source} → {identity.destination}</code><small>{identity.transport.toUpperCase()} · SSRC 0x{identity.ssrc.toString(16).padStart(8, "0")} · PT {identity.payload_types.join(", ")}{identity.channel !== null ? ` · Channel ${identity.channel}` : ""} · {identity.codec ?? "编码待确认"}</small></div>
                   <button type="button" disabled={running || !run.result.request.source_path} onClick={() => analyzeCaptureStreams([identity.id])}>深入分析此流</button>
                 </div>}
-                <div className="tabs" role="tablist">
+                <div className="tabs" role="tablist" ref={tabsRef}>
+                  <span className="tabs-indicator" aria-hidden="true" />
                   <button className={view === "overview" ? "active" : ""} onClick={() => setView("overview")} type="button">{captureOverview ? "媒体流总览" : "总览"}</button>
                   {!captureOverview && <>
                   <button className={view === "playback" ? "active" : ""} onClick={() => setView("playback")} type="button">音视频回放</button>

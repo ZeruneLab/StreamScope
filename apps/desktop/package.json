@@ -12,6 +12,7 @@
     "@tauri-apps/api": "^2.8.0",
     "@tauri-apps/plugin-dialog": "^2.4.0",
     "echarts": "^6.1.0",
+    "lucide-react": "^1.47.0",
     "react": "^19.1.1",
     "react-dom": "^19.1.1"
   },
