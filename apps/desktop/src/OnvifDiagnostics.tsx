@@ -105,6 +105,19 @@ function rtspUriWithCredentials(uri: string, username: string, password: string)
   }
 }
 
+const operationStatusLabels: Record<string, string> = {
+  passed: "通过",
+  not_supported: "不支持",
+  invalid_response: "回复不合法",
+  failed: "失败",
+  skipped: "未执行",
+};
+
+function operationEvidence(operation: OperationResult): string {
+  const fault = [operation.soap_fault_code, operation.soap_fault_reason].filter(Boolean).join(" · ");
+  return fault || operation.detail;
+}
+
 export default function OnvifDiagnostics({ onAnalyzeRtsp }: { onAnalyzeRtsp: (uri: string) => void }) {
   const [endpoint, setEndpoint] = useState("");
   const [username, setUsername] = useState("");
@@ -116,6 +129,10 @@ export default function OnvifDiagnostics({ onAnalyzeRtsp }: { onAnalyzeRtsp: (ur
   const [devices, setDevices] = useState<DiscoveredDevice[]>([]);
   const [result, setResult] = useState<OnvifDiagnosticResult | null>(null);
   const [error, setError] = useState("");
+  const operationCounts = result?.operations.reduce<Record<string, number>>((counts, operation) => {
+    counts[operation.status] = (counts[operation.status] ?? 0) + 1;
+    return counts;
+  }, {}) ?? {};
 
   async function discoverDevices() {
     setError("");
@@ -184,7 +201,7 @@ export default function OnvifDiagnostics({ onAnalyzeRtsp }: { onAnalyzeRtsp: (ur
 
     <section className={`results panel ${result ? "has-result" : ""}`}>
       <div className="panel-heading results-heading"><div><span className="step">02</span><h2>ONVIF 诊断结果</h2></div>{result && <code>{result.normalized_device_service}</code>}</div>
-      {!result ? <div className="empty-state"><div className="scope-graphic" aria-hidden="true"><span /></div><h3>{running ? "正在协商设备能力" : "等待 ONVIF 诊断"}</h3><p>将验证 Device、Media/Media2、Imaging、Events 与 DeviceIO 服务，并提取可交给 RTSP 分析器的 StreamUri。</p></div> : <div className="onvif-results">
+      {!result ? <div className="empty-state"><div className="scope-graphic" aria-hidden="true"><span /></div><h3>{running ? "正在逐项验证只读接口" : "等待 ONVIF 诊断"}</h3><p>将验证 Device、Media/Media2、Imaging、Events 与 DeviceIO 的安全只读接口；能力声明缺失或错误不会阻止后续独立验证。</p></div> : <div className="onvif-results">
         <div className="metrics">
           <div className="metric"><span>设备</span><strong>{result.device_information?.manufacturer ?? "—"} {result.device_information?.model ?? ""}</strong><small>固件 {result.device_information?.firmware_version ?? "未知"}</small></div>
           <div className="metric"><span>标准服务</span><strong>{result.services.length}</strong><small>GetServices / GetCapabilities</small></div>
@@ -193,13 +210,21 @@ export default function OnvifDiagnostics({ onAnalyzeRtsp }: { onAnalyzeRtsp: (ur
           <div className="metric"><span>设备时钟偏差</span><strong>{result.device_clock_offset_seconds == null ? "—" : `${result.device_clock_offset_seconds} s`}</strong><small>用于校正 WS-Security Created</small></div>
         </div>
 
+        <div className="onvif-step-summary" aria-label="ONVIF 步骤状态汇总">
+          <div className="passed"><span>通过</span><strong>{operationCounts.passed ?? 0}</strong><small>响应结构与关键字段有效</small></div>
+          <div className="not-supported"><span>不支持</span><strong>{operationCounts.not_supported ?? 0}</strong><small>接口端点不存在或标准 Fault 明确拒绝</small></div>
+          <div className="invalid-response"><span>回复不合法</span><strong>{operationCounts.invalid_response ?? 0}</strong><small>HTTP 成功但 SOAP/字段不符合标准</small></div>
+          <div className="failed"><span>失败</span><strong>{operationCounts.failed ?? 0}</strong><small>网络、鉴权、HTTP 或 SOAP Fault 失败</small></div>
+          <div className="skipped"><span>未执行</span><strong>{operationCounts.skipped ?? 0}</strong><small>缺少上游服务、Profile 或 Token</small></div>
+        </div>
+
         {result.findings.length > 0 && <div className="onvif-section"><h3>诊断结论</h3>{result.findings.map((finding, index) => <div className={`onvif-finding ${finding.severity}`} key={`${finding.title}-${index}`}><strong>{finding.title}</strong><span>{finding.evidence}</span><small>{finding.suggestion}</small></div>)}</div>}
 
         <div className="onvif-section"><h3>媒体配置与 RTSP 入口</h3>{result.stream_uris.length === 0 ? <p>设备没有返回可用的 StreamUri。</p> : result.stream_uris.map((stream) => <div className="onvif-stream" key={`${stream.profile_token}-${stream.uri}`}><div><strong>{stream.profile_name ?? stream.profile_token}</strong><code>{displayUri(stream.uri)}</code></div><button type="button" onClick={() => onAnalyzeRtsp(rtspUriWithCredentials(stream.uri, username, password))}>转到 RTSP 深度分析</button></div>)}</div>
 
         <div className="onvif-section"><h3>服务目录</h3><div className="onvif-table"><div className="onvif-table-head"><span>命名空间</span><span>版本</span><span>XAddr</span></div>{result.services.map((service) => <div key={`${service.namespace}-${service.xaddr}`}><code>{service.namespace}</code><span>{service.version ?? "—"}</span><code>{service.xaddr}</code></div>)}</div></div>
 
-        <div className="onvif-section"><h3>标准接口验证</h3><div className="onvif-operations">{result.operations.map((operation, index) => <div key={`${operation.service}-${operation.operation}-${index}`}><span className={`operation-status ${operation.status}`}>{operation.status === "passed" ? "PASS" : "FAIL"}</span><strong>{operation.service} / {operation.operation}</strong><span>{operation.elapsed_ms} ms · HTTP {operation.http_status ?? "—"}</span><small>{operation.soap_fault_reason ?? operation.detail}</small></div>)}</div></div>
+        <div className="onvif-section"><h3>标准接口逐步骤诊断</h3><div className="onvif-operations">{result.operations.map((operation, index) => <div key={`${operation.service}-${operation.operation}-${index}`}><span className={`operation-status ${operation.status}`}>{operationStatusLabels[operation.status] ?? operation.status}</span><strong>{operation.service} / {operation.operation}</strong><span>{operation.elapsed_ms} ms · HTTP {operation.http_status ?? "—"}</span><small title={operation.endpoint}>{operationEvidence(operation)}</small></div>)}</div></div>
 
         <details className="quality-method"><summary>本次采用的标准边界</summary>{result.standards.map((standard) => <p key={standard}>{standard}</p>)}</details>
       </div>}

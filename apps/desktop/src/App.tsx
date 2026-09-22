@@ -469,7 +469,7 @@ function App() {
 
         <div className="sidebar-footer">
           <span className="online-dot" />本机分析引擎
-          <small>高级音画诊断 · v0.1.6</small>
+          <small>高级音画诊断 · v0.1.7</small>
         </div>
       </aside>
 

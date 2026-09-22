@@ -179,7 +179,16 @@ impl XmlNode {
 #[derive(Debug)]
 struct SoapResponse {
     status: u16,
+    content_type: Option<String>,
     body: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ResponseAssessment {
+    status: &'static str,
+    detail: String,
+    soap_fault_code: Option<String>,
+    soap_fault_reason: Option<String>,
 }
 
 #[derive(Debug)]
@@ -187,6 +196,12 @@ struct SoapClient {
     http: Client,
     credentials: Option<OnvifCredentials>,
     clock_offset_seconds: i64,
+}
+
+#[derive(Debug, Clone)]
+struct ServiceTarget {
+    service: OnvifService,
+    inferred: bool,
 }
 
 pub fn normalize_device_service(input: &str) -> Result<String, OnvifError> {
@@ -317,12 +332,20 @@ pub fn diagnose(options: DiagnosticOptions) -> Result<OnvifDiagnosticResult, Onv
         &endpoint,
         &action(DEVICE_NS, "GetSystemDateAndTime"),
         &time_body,
-    ) && let Ok(root) = parse_xml(&xml)
-        && let Some(device_time) = parse_device_utc(&root)
-    {
-        let offset = device_time.timestamp() - Utc::now().timestamp();
-        client.clock_offset_seconds = offset;
-        result.device_clock_offset_seconds = Some(offset);
+    ) {
+        let device_time = parse_xml(&xml)
+            .ok()
+            .and_then(|root| parse_device_utc(&root));
+        if let Some(device_time) = device_time {
+            let offset = device_time.timestamp() - Utc::now().timestamp();
+            client.clock_offset_seconds = offset;
+            result.device_clock_offset_seconds = Some(offset);
+        } else {
+            mark_last_invalid(
+                &mut result.operations,
+                "GetSystemDateAndTimeResponse 的 UTCDateTime 缺失或数值不合法",
+            );
+        }
     }
     client.credentials = options.credentials.clone();
 
@@ -351,7 +374,17 @@ pub fn diagnose(options: DiagnosticOptions) -> Result<OnvifDiagnosticResult, Onv
         &action(DEVICE_NS, "GetServices"),
         &services_body,
     ) {
-        result.services = parse_services(&xml).unwrap_or_default();
+        match parse_services(&xml) {
+            Ok(services) if !services.is_empty() => result.services = services,
+            Ok(_) => mark_last_invalid(
+                &mut result.operations,
+                "GetServicesResponse 没有包含任何 Service",
+            ),
+            Err(error) => mark_last_invalid(
+                &mut result.operations,
+                &format!("GetServicesResponse 中的 Service 字段不完整：{error}"),
+            ),
+        }
     }
 
     let capabilities_body = format!(
@@ -382,25 +415,44 @@ pub fn diagnose(options: DiagnosticOptions) -> Result<OnvifDiagnosticResult, Onv
         );
     }
 
-    let media_service = result
-        .services
-        .iter()
-        .find(|service| namespace_matches(&service.namespace, MEDIA2_NS))
-        .cloned()
-        .or_else(|| {
-            result
-                .services
-                .iter()
-                .find(|service| namespace_matches(&service.namespace, MEDIA_NS))
-                .cloned()
-        });
-    if let Some(service) = media_service {
-        let namespace = if namespace_matches(&service.namespace, MEDIA2_NS) {
-            MEDIA2_NS
-        } else {
-            MEDIA_NS
-        };
-        let prefix = if namespace == MEDIA2_NS { "tr2" } else { "trt" };
+    let media_targets = [
+        (
+            "Media2",
+            MEDIA2_NS,
+            "tr2",
+            resolve_service_target(
+                &result.services,
+                MEDIA2_NS,
+                &endpoint,
+                "/onvif/media2_service",
+            ),
+        ),
+        (
+            "Media",
+            MEDIA_NS,
+            "trt",
+            resolve_service_target(
+                &result.services,
+                MEDIA_NS,
+                &endpoint,
+                "/onvif/media_service",
+            ),
+        ),
+    ];
+    for (service_name, namespace, prefix, target) in media_targets {
+        let service = &target.service;
+        let profile_start = result.profiles.len();
+        let capabilities_body =
+            format!("<{prefix}:GetServiceCapabilities xmlns:{prefix}=\"{namespace}\"/>");
+        call_service_operation(
+            &client,
+            &mut result.operations,
+            &target,
+            service_name,
+            "GetServiceCapabilities",
+            &action(namespace, "GetServiceCapabilities"),
+            &capabilities_body,
+        );
         let body = if namespace == MEDIA2_NS {
             format!(
                 "<{prefix}:GetProfiles xmlns:{prefix}=\"{namespace}\"><{prefix}:Type>All</{prefix}:Type></{prefix}:GetProfiles>"
@@ -408,23 +460,37 @@ pub fn diagnose(options: DiagnosticOptions) -> Result<OnvifDiagnosticResult, Onv
         } else {
             format!("<{prefix}:GetProfiles xmlns:{prefix}=\"{namespace}\"/>")
         };
-        if let Some(xml) = call_and_record(
+        if let Some(xml) = call_service_operation(
             &client,
             &mut result.operations,
-            if namespace == MEDIA2_NS {
-                "Media2"
-            } else {
-                "Media"
-            },
+            &target,
+            service_name,
             "GetProfiles",
-            &service.xaddr,
             &action(namespace, "GetProfiles"),
             &body,
         ) {
-            result.profiles = parse_profiles(&xml, namespace).unwrap_or_default();
+            match parse_profiles(&xml, namespace) {
+                Ok(profiles) => result.profiles.extend(profiles),
+                Err(error) => mark_last_invalid(
+                    &mut result.operations,
+                    &format!("GetProfilesResponse 中的 Profile 字段不完整：{error}"),
+                ),
+            }
         }
 
-        for profile in result.profiles.clone() {
+        let media_profiles = result.profiles[profile_start..].to_vec();
+        if media_profiles.is_empty() {
+            record_unavailable_operation(
+                &mut result.operations,
+                service_name,
+                "GetStreamUri",
+                &service.xaddr,
+                "skipped",
+                "该服务的 GetProfiles 未返回可用于请求 StreamUri 的 ProfileToken；其他服务仍继续验证",
+            );
+        }
+
+        for profile in media_profiles {
             let body = if namespace == MEDIA2_NS {
                 format!(
                     "<tr2:GetStreamUri xmlns:tr2=\"{MEDIA2_NS}\"><tr2:Protocol>RTSP</tr2:Protocol><tr2:ProfileToken>{}</tr2:ProfileToken></tr2:GetStreamUri>",
@@ -436,60 +502,82 @@ pub fn diagnose(options: DiagnosticOptions) -> Result<OnvifDiagnosticResult, Onv
                     xml_escape(&profile.token)
                 )
             };
-            if let Some(xml) = call_and_record(
+            if let Some(xml) = call_service_operation(
                 &client,
                 &mut result.operations,
-                if namespace == MEDIA2_NS {
-                    "Media2"
-                } else {
-                    "Media"
-                },
+                &target,
+                service_name,
                 &format!("GetStreamUri [{}]", profile.token),
-                &service.xaddr,
                 &action(namespace, "GetStreamUri"),
                 &body,
             ) && let Ok(root) = parse_xml(&xml)
                 && let Some(uri) = root.value("Uri")
             {
-                result.stream_uris.push(StreamUri {
-                    profile_token: profile.token,
-                    profile_name: profile.name,
-                    uri,
-                    media_service: namespace.into(),
-                });
+                let valid_rtsp_uri = Url::parse(&uri)
+                    .ok()
+                    .is_some_and(|value| matches!(value.scheme(), "rtsp" | "rtsps"));
+                if valid_rtsp_uri {
+                    result.stream_uris.push(StreamUri {
+                        profile_token: profile.token,
+                        profile_name: profile.name,
+                        uri,
+                        media_service: namespace.into(),
+                    });
+                } else {
+                    mark_last_invalid(
+                        &mut result.operations,
+                        "GetStreamUriResponse 的 Uri 不是合法的 rtsp:// 或 rtsps:// 地址",
+                    );
+                }
             }
         }
-    } else {
-        result.findings.push(DiagnosticFinding {
-            severity: "high".into(),
-            title: "设备未公布 Media 或 Media2 服务".into(),
-            evidence: "GetServices/GetCapabilities 未提供标准媒体服务 XAddr".into(),
-            suggestion: "检查设备 ONVIF 配置、用户权限和固件的 Profile 支持情况".into(),
-        });
     }
 
-    if let Some(service) = result
-        .services
-        .iter()
-        .find(|service| namespace_matches(&service.namespace, IMAGING_NS))
-        .cloned()
+    let imaging_target = resolve_service_target(
+        &result.services,
+        IMAGING_NS,
+        &endpoint,
+        "/onvif/imaging_service",
+    );
     {
+        let service = &imaging_target.service;
+        let capabilities_body =
+            format!("<timg:GetServiceCapabilities xmlns:timg=\"{IMAGING_NS}\"/>");
+        call_service_operation(
+            &client,
+            &mut result.operations,
+            &imaging_target,
+            "Imaging",
+            "GetServiceCapabilities",
+            &action(IMAGING_NS, "GetServiceCapabilities"),
+            &capabilities_body,
+        );
         let tokens: BTreeSet<String> = result
             .profiles
             .iter()
             .filter_map(|profile| profile.video_source_token.clone())
             .collect();
+        if tokens.is_empty() {
+            record_unavailable_operation(
+                &mut result.operations,
+                "Imaging",
+                "GetImagingSettings / GetOptions",
+                &service.xaddr,
+                "skipped",
+                "没有可用 VideoSourceToken；已单独验证 Imaging/GetServiceCapabilities，但无法构造设置查询",
+            );
+        }
         for token in tokens {
             let body = format!(
                 "<timg:GetImagingSettings xmlns:timg=\"{IMAGING_NS}\"><timg:VideoSourceToken>{}</timg:VideoSourceToken></timg:GetImagingSettings>",
                 xml_escape(&token)
             );
-            call_and_record(
+            call_service_operation(
                 &client,
                 &mut result.operations,
+                &imaging_target,
                 "Imaging",
                 &format!("GetImagingSettings [{token}]"),
-                &service.xaddr,
                 &action(IMAGING_NS, "GetImagingSettings"),
                 &body,
             );
@@ -497,49 +585,51 @@ pub fn diagnose(options: DiagnosticOptions) -> Result<OnvifDiagnosticResult, Onv
                 "<timg:GetOptions xmlns:timg=\"{IMAGING_NS}\"><timg:VideoSourceToken>{}</timg:VideoSourceToken></timg:GetOptions>",
                 xml_escape(&token)
             );
-            call_and_record(
+            call_service_operation(
                 &client,
                 &mut result.operations,
+                &imaging_target,
                 "Imaging",
                 &format!("GetOptions [{token}]"),
-                &service.xaddr,
                 &action(IMAGING_NS, "GetOptions"),
                 &options_body,
             );
         }
     }
 
-    if let Some(service) = result
-        .services
-        .iter()
-        .find(|service| namespace_matches(&service.namespace, DEVICE_IO_NS))
-        .cloned()
+    let device_io_target = resolve_service_target(
+        &result.services,
+        DEVICE_IO_NS,
+        &endpoint,
+        "/onvif/deviceio_service",
+    );
     {
         let body = format!("<tmd:GetServiceCapabilities xmlns:tmd=\"{DEVICE_IO_NS}\"/>");
-        call_and_record(
+        call_service_operation(
             &client,
             &mut result.operations,
+            &device_io_target,
             "DeviceIO",
             "GetServiceCapabilities",
-            &service.xaddr,
             &action(DEVICE_IO_NS, "GetServiceCapabilities"),
             &body,
         );
     }
 
-    if let Some(service) = result
-        .services
-        .iter()
-        .find(|service| namespace_matches(&service.namespace, EVENTS_NS))
-        .cloned()
+    let events_target = resolve_service_target(
+        &result.services,
+        EVENTS_NS,
+        &endpoint,
+        "/onvif/events_service",
+    );
     {
         let body = format!("<tev:GetEventProperties xmlns:tev=\"{EVENTS_NS}\"/>");
-        call_and_record(
+        call_service_operation(
             &client,
             &mut result.operations,
+            &events_target,
             "Events",
             "GetEventProperties",
-            &service.xaddr,
             &action(EVENTS_NS, "GetEventProperties"),
             &body,
         );
@@ -602,10 +692,19 @@ impl SoapClient {
 
 fn response_body(response: Response) -> Result<SoapResponse, OnvifError> {
     let status = response.status().as_u16();
+    let content_type = response
+        .headers()
+        .get(CONTENT_TYPE)
+        .and_then(|value| value.to_str().ok())
+        .map(str::to_string);
     let body = response
         .text()
         .map_err(|error| OnvifError::Network(error.to_string()))?;
-    Ok(SoapResponse { status, body })
+    Ok(SoapResponse {
+        status,
+        content_type,
+        body,
+    })
 }
 
 fn soap_envelope(
@@ -757,29 +856,20 @@ fn call_and_record(
     let started = Instant::now();
     match client.post(endpoint, action, body) {
         Ok(response) => {
-            let fault = parse_xml(&response.body)
-                .ok()
-                .and_then(|root| parse_fault(&root));
-            let success = (200..300).contains(&response.status) && fault.is_none();
-            let (fault_code, fault_reason) = fault.unwrap_or_default();
+            let assessment = assess_response(&response, action, operation);
+            let passed = assessment.status == "passed";
             operations.push(OperationResult {
                 service: service.into(),
                 operation: operation.into(),
                 endpoint: endpoint.into(),
-                status: if success { "passed" } else { "failed" }.into(),
+                status: assessment.status.into(),
                 http_status: Some(response.status),
                 elapsed_ms: started.elapsed().as_millis() as u64,
-                detail: if success {
-                    "设备返回标准 SOAP 响应".into()
-                } else if !fault_reason.is_empty() {
-                    fault_reason.clone()
-                } else {
-                    format!("HTTP {}", response.status)
-                },
-                soap_fault_code: (!fault_code.is_empty()).then_some(fault_code),
-                soap_fault_reason: (!fault_reason.is_empty()).then_some(fault_reason),
+                detail: assessment.detail,
+                soap_fault_code: assessment.soap_fault_code,
+                soap_fault_reason: assessment.soap_fault_reason,
             });
-            success.then_some(response.body)
+            passed.then_some(response.body)
         }
         Err(error) => {
             operations.push(OperationResult {
@@ -797,7 +887,211 @@ fn call_and_record(
     }
 }
 
+fn assess_response(response: &SoapResponse, action: &str, operation: &str) -> ResponseAssessment {
+    let parsed = parse_xml(&response.body);
+    if let Ok(root) = &parsed
+        && let Some((fault_code, fault_reason)) = parse_fault(root)
+    {
+        let unsupported = is_unsupported_fault(&fault_code, &fault_reason);
+        return ResponseAssessment {
+            status: if unsupported {
+                "not_supported"
+            } else {
+                "failed"
+            },
+            detail: if fault_reason.is_empty() {
+                format!("设备返回 SOAP Fault：{fault_code}")
+            } else {
+                format!("{fault_code}：{fault_reason}")
+            },
+            soap_fault_code: (!fault_code.is_empty()).then_some(fault_code),
+            soap_fault_reason: (!fault_reason.is_empty()).then_some(fault_reason),
+        };
+    }
+
+    if matches!(response.status, 404 | 405 | 501) {
+        return ResponseAssessment {
+            status: "not_supported",
+            detail: format!("HTTP {}，目标端点没有实现该只读接口", response.status),
+            soap_fault_code: None,
+            soap_fault_reason: None,
+        };
+    }
+    if !(200..300).contains(&response.status) {
+        return ResponseAssessment {
+            status: "failed",
+            detail: format!("HTTP {}，响应中没有可识别的 SOAP Fault", response.status),
+            soap_fault_code: None,
+            soap_fault_reason: None,
+        };
+    }
+
+    let root = match parsed {
+        Ok(root) => root,
+        Err(error) => {
+            return invalid_response(format!("HTTP 成功，但 XML 无法解析：{error}"));
+        }
+    };
+    let content_type = response.content_type.as_deref().unwrap_or_default();
+    if !content_type
+        .to_ascii_lowercase()
+        .starts_with("application/soap+xml")
+    {
+        return invalid_response(format!(
+            "HTTP 成功，但 Content-Type 不是 SOAP 1.2 application/soap+xml：{}",
+            if content_type.is_empty() {
+                "未返回"
+            } else {
+                content_type
+            }
+        ));
+    }
+    if !response.body.contains(SOAP_ENVELOPE_NS) {
+        return invalid_response("回复未声明 SOAP 1.2 Envelope 命名空间".into());
+    }
+    let Some(envelope) = root.first("Envelope") else {
+        return invalid_response("回复缺少 SOAP Envelope".into());
+    };
+    let Some(body) = envelope.first("Body") else {
+        return invalid_response("回复缺少 SOAP Body".into());
+    };
+    let operation_name = operation_base_name(operation);
+    let expected_response = format!("{operation_name}Response");
+    if body.first(&expected_response).is_none() {
+        return invalid_response(format!("SOAP Body 缺少标准响应元素 {expected_response}"));
+    }
+    if let Some(namespace) = action.strip_suffix(&format!("/{operation_name}"))
+        && !response.body.contains(namespace)
+    {
+        return invalid_response(format!("回复未声明操作所属命名空间 {namespace}"));
+    }
+    if operation_name == "GetStreamUri" && body.value("Uri").is_none() {
+        return invalid_response("GetStreamUriResponse 缺少必填 Uri".into());
+    }
+
+    ResponseAssessment {
+        status: "passed",
+        detail: format!("SOAP 1.2 结构合法，并返回 {expected_response}"),
+        soap_fault_code: None,
+        soap_fault_reason: None,
+    }
+}
+
+fn invalid_response(detail: String) -> ResponseAssessment {
+    ResponseAssessment {
+        status: "invalid_response",
+        detail,
+        soap_fault_code: None,
+        soap_fault_reason: None,
+    }
+}
+
+fn operation_base_name(operation: &str) -> &str {
+    operation
+        .split_once([' ', '['])
+        .map(|(name, _)| name)
+        .unwrap_or(operation)
+}
+
+fn is_unsupported_fault(code: &str, reason: &str) -> bool {
+    let evidence = format!("{code} {reason}").to_ascii_lowercase();
+    evidence.contains("actionnotsupported")
+        || evidence.contains("not supported")
+        || evidence.contains("notsupported")
+        || evidence.contains("optionalactionnotimplemented")
+        || evidence.contains("unsupported")
+}
+
+fn record_unavailable_operation(
+    operations: &mut Vec<OperationResult>,
+    service: &str,
+    operation: &str,
+    endpoint: &str,
+    status: &str,
+    detail: &str,
+) {
+    operations.push(OperationResult {
+        service: service.into(),
+        operation: operation.into(),
+        endpoint: endpoint.into(),
+        status: status.into(),
+        detail: detail.into(),
+        ..OperationResult::default()
+    });
+}
+
+fn resolve_service_target(
+    services: &[OnvifService],
+    namespace: &str,
+    device_endpoint: &str,
+    fallback_path: &str,
+) -> ServiceTarget {
+    if let Some(service) = services
+        .iter()
+        .find(|service| namespace_matches(&service.namespace, namespace))
+        .cloned()
+    {
+        return ServiceTarget {
+            service,
+            inferred: false,
+        };
+    }
+    let mut endpoint = Url::parse(device_endpoint).expect("normalized device endpoint is a URL");
+    endpoint.set_path(fallback_path);
+    endpoint.set_query(None);
+    endpoint.set_fragment(None);
+    ServiceTarget {
+        service: OnvifService {
+            namespace: namespace.into(),
+            xaddr: endpoint.to_string(),
+            version: None,
+        },
+        inferred: true,
+    }
+}
+
+fn call_service_operation(
+    client: &SoapClient,
+    operations: &mut Vec<OperationResult>,
+    target: &ServiceTarget,
+    service_name: &str,
+    operation: &str,
+    action: &str,
+    body: &str,
+) -> Option<String> {
+    let response = call_and_record(
+        client,
+        operations,
+        service_name,
+        operation,
+        &target.service.xaddr,
+        action,
+        body,
+    );
+    if target.inferred
+        && let Some(record) = operations.last_mut()
+    {
+        record.detail = format!(
+            "服务目录未提供 XAddr；已尝试同主机常见候选端点。{}",
+            record.detail
+        );
+    }
+    response
+}
+
+fn mark_last_invalid(operations: &mut [OperationResult], detail: &str) {
+    if let Some(operation) = operations.last_mut()
+        && operation.status == "passed"
+    {
+        operation.status = "invalid_response".into();
+        operation.detail = detail.into();
+    }
+}
+
 fn parse_xml(xml: &str) -> Result<XmlNode, OnvifError> {
+    if xml.trim().is_empty() {
+        return Err(OnvifError::EmptyResponse);
+    }
     let mut reader = Reader::from_str(xml);
     reader.config_mut().trim_text(true);
     let mut stack = vec![XmlNode {
@@ -866,7 +1160,12 @@ fn parse_xml(xml: &str) -> Result<XmlNode, OnvifError> {
                         .push(node);
                 }
             }
-            Ok(Event::Eof) => break,
+            Ok(Event::Eof) => {
+                if stack.len() != 1 {
+                    return Err(OnvifError::Xml("XML 在元素闭合前结束".into()));
+                }
+                break;
+            }
             Ok(_) => {}
             Err(error) => return Err(OnvifError::Xml(error.to_string())),
         }
@@ -906,16 +1205,20 @@ fn parse_services(xml: &str) -> Result<Vec<OnvifService>, OnvifError> {
     let root = parse_xml(xml)?;
     let mut nodes = Vec::new();
     root.descendants("Service", &mut nodes);
-    Ok(nodes
+    nodes
         .into_iter()
-        .filter_map(|node| {
-            Some(OnvifService {
-                namespace: node.value("Namespace")?,
-                xaddr: node.value("XAddr")?,
+        .map(|node| {
+            Ok(OnvifService {
+                namespace: node
+                    .value("Namespace")
+                    .ok_or_else(|| OnvifError::Xml("Service 缺少 Namespace".into()))?,
+                xaddr: node
+                    .value("XAddr")
+                    .ok_or_else(|| OnvifError::Xml("Service 缺少 XAddr".into()))?,
                 version: parse_version(node),
             })
         })
-        .collect())
+        .collect()
 }
 
 fn parse_version(node: &XmlNode) -> Option<String> {
@@ -958,10 +1261,15 @@ fn parse_profiles(xml: &str, media_service: &str) -> Result<Vec<MediaProfile>, O
     let root = parse_xml(xml)?;
     let mut nodes = Vec::new();
     root.descendants("Profiles", &mut nodes);
-    Ok(nodes
+    nodes
         .into_iter()
-        .filter_map(|node| {
-            let token = node.attributes.get("token")?.clone();
+        .map(|node| {
+            let token = node
+                .attributes
+                .get("token")
+                .filter(|token| !token.trim().is_empty())
+                .cloned()
+                .ok_or_else(|| OnvifError::Xml("Profile 缺少非空 token".into()))?;
             let video_source_token = node
                 .first("VideoSourceConfiguration")
                 .or_else(|| node.first("VideoSource"))
@@ -974,7 +1282,7 @@ fn parse_profiles(xml: &str, media_service: &str) -> Result<Vec<MediaProfile>, O
                 .first("AudioEncoderConfiguration")
                 .or_else(|| node.first("AudioEncoder"))
                 .and_then(|configuration| configuration.value("Encoding"));
-            Some(MediaProfile {
+            Ok(MediaProfile {
                 token,
                 name: node.value("Name"),
                 video_source_token,
@@ -983,7 +1291,7 @@ fn parse_profiles(xml: &str, media_service: &str) -> Result<Vec<MediaProfile>, O
                 media_service: media_service.into(),
             })
         })
-        .collect())
+        .collect()
 }
 
 fn parse_device_utc(root: &XmlNode) -> Option<DateTime<Utc>> {
@@ -1003,7 +1311,17 @@ fn parse_device_utc(root: &XmlNode) -> Option<DateTime<Utc>> {
 
 fn parse_fault(root: &XmlNode) -> Option<(String, String)> {
     let fault = root.first("Fault")?;
-    let code = fault.value("Value").unwrap_or_default();
+    let mut values = Vec::new();
+    fault
+        .first("Code")
+        .unwrap_or(fault)
+        .descendants("Value", &mut values);
+    let code = values
+        .into_iter()
+        .map(|node| node.text.trim())
+        .filter(|value| !value.is_empty())
+        .collect::<Vec<_>>()
+        .join(" / ");
     let reason = fault
         .first("Reason")
         .and_then(|node| node.value("Text"))
@@ -1024,8 +1342,8 @@ fn build_findings(result: &mut OnvifDiagnosticResult) {
         });
     }
     for operation in &result.operations {
-        if operation.status == "failed" {
-            result.findings.push(DiagnosticFinding {
+        match operation.status.as_str() {
+            "failed" => result.findings.push(DiagnosticFinding {
                 severity: if operation.service == "Device" {
                     "high"
                 } else {
@@ -1036,8 +1354,58 @@ fn build_findings(result: &mut OnvifDiagnosticResult) {
                 evidence: operation.detail.clone(),
                 suggestion: "核对服务 XAddr、账号权限、设备时间及该接口是否由当前 Profile 声明"
                     .into(),
-            });
+            }),
+            "invalid_response" => result.findings.push(DiagnosticFinding {
+                severity: "high".into(),
+                title: format!(
+                    "{} / {} 回复不符合标准",
+                    operation.service, operation.operation
+                ),
+                evidence: operation.detail.clone(),
+                suggestion: "保存该步骤的 HTTP/SOAP 证据并核对设备固件；不要把 HTTP 2xx 直接视为 ONVIF 操作成功"
+                    .into(),
+            }),
+            _ => {}
         }
+    }
+    let unsupported = result
+        .operations
+        .iter()
+        .filter(|operation| operation.status == "not_supported")
+        .map(|operation| {
+            format!(
+                "{}/{}：{}",
+                operation.service, operation.operation, operation.detail
+            )
+        })
+        .collect::<Vec<_>>();
+    if !unsupported.is_empty() {
+        result.findings.push(DiagnosticFinding {
+            severity: "low".into(),
+            title: format!("{} 项只读接口不受支持", unsupported.len()),
+            evidence: unsupported.join("；"),
+            suggestion: "对照设备声明的 ONVIF Profile 和固件说明确认能力边界；不支持的可选接口不等于其他接口失败".into(),
+        });
+    }
+    let skipped = result
+        .operations
+        .iter()
+        .filter(|operation| operation.status == "skipped")
+        .map(|operation| {
+            format!(
+                "{}/{}：{}",
+                operation.service, operation.operation, operation.detail
+            )
+        })
+        .collect::<Vec<_>>();
+    if !skipped.is_empty() {
+        result.findings.push(DiagnosticFinding {
+            severity: "medium".into(),
+            title: format!("{} 项接口因缺少必需输入未执行", skipped.len()),
+            evidence: skipped.join("；"),
+            suggestion: "先修复上游 ProfileToken、VideoSourceToken 或服务端点，再重新执行完整诊断"
+                .into(),
+        });
     }
     if !result.profiles.is_empty() && result.stream_uris.is_empty() {
         result.findings.push(DiagnosticFinding {
@@ -1161,5 +1529,124 @@ mod tests {
         assert!(header.starts_with("Digest username=\"admin\""));
         assert!(header.contains("qop=auth"));
         assert!(header.contains("uri=\"/onvif/device_service\""));
+    }
+
+    #[test]
+    fn classifies_standard_soap_response_as_passed() {
+        let response = SoapResponse {
+            status: 200,
+            content_type: Some("application/soap+xml; charset=utf-8".into()),
+            body: format!(
+                r#"<s:Envelope xmlns:s="{SOAP_ENVELOPE_NS}" xmlns:tds="{DEVICE_NS}"><s:Body><tds:GetDeviceInformationResponse><tds:Manufacturer>Acme</tds:Manufacturer></tds:GetDeviceInformationResponse></s:Body></s:Envelope>"#
+            ),
+        };
+        let assessment = assess_response(
+            &response,
+            &action(DEVICE_NS, "GetDeviceInformation"),
+            "GetDeviceInformation",
+        );
+        assert_eq!(assessment.status, "passed");
+    }
+
+    #[test]
+    fn classifies_action_not_supported_fault_separately() {
+        let response = SoapResponse {
+            status: 500,
+            content_type: Some("application/soap+xml".into()),
+            body: format!(
+                r#"<s:Envelope xmlns:s="{SOAP_ENVELOPE_NS}" xmlns:ter="{SCHEMA_NS}"><s:Body><s:Fault><s:Code><s:Value>s:Sender</s:Value><s:Subcode><s:Value>ter:ActionNotSupported</s:Value></s:Subcode></s:Code><s:Reason><s:Text>Optional action not supported</s:Text></s:Reason></s:Fault></s:Body></s:Envelope>"#
+            ),
+        };
+        let assessment = assess_response(
+            &response,
+            &action(EVENTS_NS, "GetEventProperties"),
+            "GetEventProperties",
+        );
+        assert_eq!(assessment.status, "not_supported");
+        assert!(
+            assessment
+                .soap_fault_code
+                .as_deref()
+                .is_some_and(|code| code.contains("ActionNotSupported"))
+        );
+    }
+
+    #[test]
+    fn rejects_http_success_with_non_soap_body() {
+        let response = SoapResponse {
+            status: 200,
+            content_type: Some("text/html".into()),
+            body: "<html><body>camera web page</body></html>".into(),
+        };
+        let assessment =
+            assess_response(&response, &action(DEVICE_NS, "GetServices"), "GetServices");
+        assert_eq!(assessment.status, "invalid_response");
+        assert!(assessment.detail.contains("Content-Type"));
+    }
+
+    #[test]
+    fn rejects_stream_uri_response_without_uri() {
+        let response = SoapResponse {
+            status: 200,
+            content_type: Some("application/soap+xml".into()),
+            body: format!(
+                r#"<s:Envelope xmlns:s="{SOAP_ENVELOPE_NS}" xmlns:trt="{MEDIA_NS}"><s:Body><trt:GetStreamUriResponse/></s:Body></s:Envelope>"#
+            ),
+        };
+        let assessment = assess_response(
+            &response,
+            &action(MEDIA_NS, "GetStreamUri"),
+            "GetStreamUri [profile-1]",
+        );
+        assert_eq!(assessment.status, "invalid_response");
+        assert!(assessment.detail.contains("Uri"));
+    }
+
+    #[test]
+    fn rejects_truncated_xml() {
+        let error = parse_xml("<Envelope><Body>").unwrap_err();
+        assert!(error.to_string().contains("闭合前结束"));
+    }
+
+    #[test]
+    fn infers_service_endpoint_without_trusting_capability_list() {
+        let target = resolve_service_target(
+            &[],
+            MEDIA_NS,
+            "http://192.0.2.20:8080/onvif/device_service",
+            "/onvif/media_service",
+        );
+        assert!(target.inferred);
+        assert_eq!(
+            target.service.xaddr,
+            "http://192.0.2.20:8080/onvif/media_service"
+        );
+
+        let advertised = OnvifService {
+            namespace: MEDIA_NS.into(),
+            xaddr: "http://camera/custom/media".into(),
+            version: Some("1.0".into()),
+        };
+        let target = resolve_service_target(
+            std::slice::from_ref(&advertised),
+            MEDIA_NS,
+            "http://camera/onvif/device_service",
+            "/onvif/media_service",
+        );
+        assert!(!target.inferred);
+        assert_eq!(target.service, advertised);
+    }
+
+    #[test]
+    fn classifies_missing_candidate_endpoint_as_not_supported() {
+        let response = SoapResponse {
+            status: 404,
+            content_type: Some("text/html".into()),
+            body: "not found".into(),
+        };
+        let assessment =
+            assess_response(&response, &action(MEDIA2_NS, "GetProfiles"), "GetProfiles");
+        assert_eq!(assessment.status, "not_supported");
+        assert!(assessment.detail.contains("404"));
     }
 }

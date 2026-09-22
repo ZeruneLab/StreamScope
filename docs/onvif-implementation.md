@@ -29,6 +29,10 @@ WS-Discovery
 - DeviceIO：发现服务后调用 GetServiceCapabilities
 - HTTPS：默认校验证书，可由用户明确允许当前设备的自签名证书
 - SOAP Fault：保留 fault code、reason、HTTP 状态和耗时作为诊断证据
+- 逐步骤诊断：明确区分“通过、不支持、回复不合法、失败、未执行”，并统计每类数量
+- 回复合法性：校验 SOAP 1.2 Content-Type、Envelope/Body、操作响应元素、服务命名空间、关键字段、StreamUri 和 XML 完整性；HTTP 2xx 不再自动判定为通过
+- 能力声明不作为停止条件：GetServices/GetCapabilities 缺少或错误时，仍尝试同主机常见候选端点并在证据中标记“推断端点”；Media/Media2、Imaging、Events、DeviceIO 互不阻断
+- 依赖边界：只有缺少 ProfileToken、VideoSourceToken 等构造请求所必需的输入时才显示“未执行”；端点 404/405/501 或标准 NotSupported Fault 显示为“不支持”
 
 ## 标准来源
 
@@ -45,3 +49,7 @@ WS-Discovery
 这里的“符合标准”指报文命名空间、SOAPAction、请求结构和响应字段以 ONVIF 官方规范/WSDL 为依据，并有本地协议测试。它不等同于 ONVIF 官方认证；正式宣称设备或客户端合规仍需运行对应版本的 ONVIF Client Test Tool / Device Test Tool 并满足适用 Profile 的测试规范。
 
 当前版本不会在 ONVIF 模块中解析媒体包，也不会把 StreamUri 当成媒体已经正常。只有继续执行 RTSP/RTP/编解码诊断后，才能形成媒体链路结论。
+
+## AI 使用边界
+
+接口通过、不支持、回复不合法、失败和未执行均由协议/WSDL、HTTP、SOAP Fault 与必填字段规则确定，不接入 AI 判定。这样同一份证据可以稳定复现，也不会因模型输出改变合规结论。后续如增加 AI，只能作为可选解释层，用于归纳厂商兼容性特征、生成排查建议或把多项确定性证据整理成自然语言；AI 不得接触明文设备密码，也不得覆盖底层规则结论。
