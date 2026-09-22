@@ -234,6 +234,26 @@ pub struct AudioIssue {
     pub first_packet: Option<u64>,
     #[serde(default)]
     pub offset_ms: Option<u64>,
+    #[serde(default)]
+    pub previous_packet: Option<u64>,
+    #[serde(default)]
+    pub previous_offset_ms: Option<u64>,
+    #[serde(default)]
+    pub previous_rtp_sequence: Option<u16>,
+    #[serde(default)]
+    pub current_rtp_sequence: Option<u16>,
+    #[serde(default)]
+    pub expected_rtp_timestamp: Option<u32>,
+    #[serde(default)]
+    pub actual_rtp_timestamp: Option<u32>,
+    #[serde(default)]
+    pub delta_timestamp: Option<i64>,
+    #[serde(default)]
+    pub duration_ms: Option<u64>,
+    #[serde(default)]
+    pub media_start_ms: Option<u64>,
+    #[serde(default)]
+    pub media_end_ms: Option<u64>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]

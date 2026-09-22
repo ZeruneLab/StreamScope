@@ -824,14 +824,16 @@ pub fn build_timeline(result: &AnalysisResult) -> Vec<TimelineEvent> {
                 source: "Audio".into(),
                 event_type: issue.kind.clone(),
                 severity: severity_for_audio_issue(&issue.kind),
-                sequence: None,
-                rtp_timestamp: None,
+                sequence: issue.current_rtp_sequence,
+                rtp_timestamp: issue.actual_rtp_timestamp,
                 frame_number: None,
-                first_packet: issue.first_packet,
+                first_packet: issue.previous_packet.or(issue.first_packet),
                 last_packet: issue.first_packet,
                 location_precision: issue
-                    .first_packet
-                    .map(|_| "exact_capture_packet".into())
+                    .previous_packet
+                    .zip(issue.first_packet)
+                    .map(|_| "exact_capture_packet_pair+rtp_media_interval".into())
+                    .or_else(|| issue.first_packet.map(|_| "exact_capture_packet".into()))
                     .or_else(|| issue.offset_ms.map(|_| "capture_time".into())),
                 detail: issue.detail.clone(),
             });
@@ -1932,20 +1934,36 @@ fn evidence_for(
                 value.timestamp_gap_count > 0 || value.timestamp_overlap_count > 0
             }) =>
         {
-            Some((
-                90,
-                "音频 RTP 时间轴存在缺口或重叠。".into(),
-                vec![
-                    DiagnosticEvidence {
-                        label: "时间戳缺口".into(),
-                        value: audio?.timestamp_gap_count.to_string(),
-                    },
-                    DiagnosticEvidence {
-                        label: "时间戳重叠".into(),
-                        value: audio?.timestamp_overlap_count.to_string(),
-                    },
-                ],
-            ))
+            let audio = audio?;
+            let mut evidence = vec![
+                DiagnosticEvidence {
+                    label: "时间戳缺口".into(),
+                    value: audio.timestamp_gap_count.to_string(),
+                },
+                DiagnosticEvidence {
+                    label: "时间戳重叠".into(),
+                    value: audio.timestamp_overlap_count.to_string(),
+                },
+            ];
+            if let Some(issue) = audio
+                .issues
+                .iter()
+                .find(|issue| matches!(issue.kind.as_str(), "timestamp_gap" | "timestamp_overlap"))
+            {
+                evidence.push(DiagnosticEvidence {
+                    label: "首个异常位置".into(),
+                    value: format!(
+                        "媒体 {}–{} ms；抓包 #{}→#{}；Seq {}→{}",
+                        issue.media_start_ms.unwrap_or_default(),
+                        issue.media_end_ms.unwrap_or_default(),
+                        issue.previous_packet.unwrap_or_default(),
+                        issue.first_packet.unwrap_or_default(),
+                        issue.previous_rtp_sequence.unwrap_or_default(),
+                        issue.current_rtp_sequence.unwrap_or_default()
+                    ),
+                });
+            }
+            Some((90, "音频 RTP 时间轴存在缺口或重叠。".into(), evidence))
         }
         "AUD-043"
             if audio.is_some_and(|value| {
@@ -2450,6 +2468,7 @@ mod tests {
                     detail: "gap".into(),
                     first_packet: Some(42),
                     offset_ms: Some(120),
+                    ..AudioIssue::default()
                 },
                 AudioIssue {
                     kind: "near_silence".into(),

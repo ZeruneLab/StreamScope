@@ -617,19 +617,42 @@ pub fn analyze(
     let mut overlap_count = 0_u64;
     let mut issues = Vec::new();
     let mut expected_timestamp = None;
+    let base_timestamp = packets.first().map_or(0, |packet| packet.timestamp);
+    let mut previous_packet: Option<&AudioRtpPayload> = None;
     let mut mappings = Vec::with_capacity(packets.len());
     let mut encoded_offset = 0_u64;
     for (packet_index, packet) in packets.iter().enumerate() {
         if let Some(expected) = expected_timestamp {
             let delta = packet.timestamp.wrapping_sub(expected) as i32;
+            let duration_ms = u64::from(delta.unsigned_abs()).saturating_mul(1_000)
+                / u64::from(clock_rate.max(1));
+            let expected_ms = u64::from(expected.wrapping_sub(base_timestamp))
+                .saturating_mul(1_000)
+                / u64::from(clock_rate.max(1));
+            let actual_ms = u64::from(packet.timestamp.wrapping_sub(base_timestamp))
+                .saturating_mul(1_000)
+                / u64::from(clock_rate.max(1));
             if delta > 0 {
                 gap_count += 1;
                 if issues.len() < 128 {
                     issues.push(AudioIssue {
                         kind: "timestamp_gap".into(),
-                        detail: format!("音频 RTP 时间戳缺口 {} 个采样时钟", delta),
+                        detail: format!(
+                            "音频 RTP 时间戳缺口 {} 个采样时钟（约 {} ms）",
+                            delta, duration_ms
+                        ),
                         first_packet: packet.packet_number,
                         offset_ms: packet.offset_ms,
+                        previous_packet: previous_packet.and_then(|value| value.packet_number),
+                        previous_offset_ms: previous_packet.and_then(|value| value.offset_ms),
+                        previous_rtp_sequence: previous_packet.and_then(|value| value.sequence),
+                        current_rtp_sequence: packet.sequence,
+                        expected_rtp_timestamp: Some(expected),
+                        actual_rtp_timestamp: Some(packet.timestamp),
+                        delta_timestamp: Some(i64::from(delta)),
+                        duration_ms: Some(duration_ms),
+                        media_start_ms: Some(expected_ms),
+                        media_end_ms: Some(actual_ms),
                     });
                 }
             } else if delta < 0 {
@@ -637,9 +660,23 @@ pub fn analyze(
                 if issues.len() < 128 {
                     issues.push(AudioIssue {
                         kind: "timestamp_overlap".into(),
-                        detail: format!("音频 RTP 时间戳回退或重叠 {} 个采样时钟", -delta),
+                        detail: format!(
+                            "音频 RTP 时间戳回退或重叠 {} 个采样时钟（约 {} ms）",
+                            delta.unsigned_abs(),
+                            duration_ms
+                        ),
                         first_packet: packet.packet_number,
                         offset_ms: packet.offset_ms,
+                        previous_packet: previous_packet.and_then(|value| value.packet_number),
+                        previous_offset_ms: previous_packet.and_then(|value| value.offset_ms),
+                        previous_rtp_sequence: previous_packet.and_then(|value| value.sequence),
+                        current_rtp_sequence: packet.sequence,
+                        expected_rtp_timestamp: Some(expected),
+                        actual_rtp_timestamp: Some(packet.timestamp),
+                        delta_timestamp: Some(i64::from(delta)),
+                        duration_ms: Some(duration_ms),
+                        media_start_ms: Some(actual_ms),
+                        media_end_ms: Some(expected_ms),
                     });
                 }
             }
@@ -669,6 +706,7 @@ pub fn analyze(
         });
         encoded_offset = encoded_offset.saturating_add(packet.payload.len() as u64);
         expected_timestamp = Some(packet.timestamp.wrapping_add(frames));
+        previous_packet = Some(packet);
     }
 
     if let Some(path) = wav_path {
@@ -1452,7 +1490,52 @@ mod tests {
         assert_eq!(result.sample_mappings[0].pcm_start_sample, 0);
         assert_eq!(result.sample_mappings[0].pcm_end_sample, 160);
         assert_eq!(result.sample_mappings[1].rtp_sequence, Some(11));
+        let gap = result
+            .issues
+            .iter()
+            .find(|issue| issue.kind == "timestamp_gap")
+            .unwrap();
+        assert_eq!(gap.previous_packet, Some(1));
+        assert_eq!(gap.first_packet, Some(2));
+        assert_eq!(gap.previous_rtp_sequence, Some(10));
+        assert_eq!(gap.current_rtp_sequence, Some(11));
+        assert_eq!(gap.expected_rtp_timestamp, Some(160));
+        assert_eq!(gap.actual_rtp_timestamp, Some(320));
+        assert_eq!(gap.delta_timestamp, Some(160));
+        assert_eq!(gap.duration_ms, Some(20));
+        assert_eq!(gap.media_start_ms, Some(20));
+        assert_eq!(gap.media_end_ms, Some(40));
         assert!(!result.conclusion_reliable);
+    }
+
+    #[test]
+    fn g711_analysis_locates_timestamp_overlap() {
+        let packets = vec![
+            AudioRtpPayload {
+                packet_number: Some(7),
+                offset_ms: Some(100),
+                sequence: Some(20),
+                timestamp: 1_000,
+                payload: vec![0xd5; 160],
+            },
+            AudioRtpPayload {
+                packet_number: Some(8),
+                offset_ms: Some(120),
+                sequence: Some(21),
+                timestamp: 1_080,
+                payload: vec![0xd5; 160],
+            },
+        ];
+        let result = analyze("PCMA", 8_000, Some(1), &packets, false, None).unwrap();
+        let overlap = result
+            .issues
+            .iter()
+            .find(|issue| issue.kind == "timestamp_overlap")
+            .unwrap();
+        assert_eq!(overlap.delta_timestamp, Some(-80));
+        assert_eq!(overlap.duration_ms, Some(10));
+        assert_eq!(overlap.media_start_ms, Some(10));
+        assert_eq!(overlap.media_end_ms, Some(20));
     }
 
     #[test]

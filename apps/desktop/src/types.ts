@@ -528,6 +528,16 @@ export interface AnalysisResult {
       detail: string;
       first_packet: number | null;
       offset_ms: number | null;
+      previous_packet: number | null;
+      previous_offset_ms: number | null;
+      previous_rtp_sequence: number | null;
+      current_rtp_sequence: number | null;
+      expected_rtp_timestamp: number | null;
+      actual_rtp_timestamp: number | null;
+      delta_timestamp: number | null;
+      duration_ms: number | null;
+      media_start_ms: number | null;
+      media_end_ms: number | null;
     }>;
     sample_mappings: Array<{
       packet_number: number | null;

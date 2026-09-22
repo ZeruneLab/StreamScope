@@ -5,7 +5,7 @@ use streamscope_analyzer::{
     AnalysisRun, AnalyzeOptions, AudioFileOptions, GeneratedReports, H264FileOptions,
     H265FileOptions, PcapFileOptions,
 };
-use streamscope_core::{AnalysisResult, Transport};
+use streamscope_core::{AnalysisResult, AudioIssue, AudioQualityInterval, Transport};
 use streamscope_onvif::{
     DiagnosticOptions as OnvifDiagnosticOptions, DiscoveredDevice, DiscoveryOptions,
     OnvifDiagnosticResult,
@@ -40,6 +40,15 @@ struct ExportMediaRequest {
     format: String,
     start_ms: Option<u64>,
     end_ms: Option<u64>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ExportAudioEvidenceRequest {
+    destination_path: String,
+    format: String,
+    issues: Vec<AudioIssue>,
+    intervals: Vec<AudioQualityInterval>,
 }
 
 #[tauri::command]
@@ -364,6 +373,125 @@ async fn export_media(
     })
     .await
     .map_err(|error| format!("导出任务异常结束：{error}"))?
+}
+
+#[tauri::command]
+fn export_audio_evidence(request: ExportAudioEvidenceRequest) -> Result<String, String> {
+    if !matches!(request.format.as_str(), "csv" | "json") {
+        return Err("音频证据仅支持导出 CSV 或 JSON".into());
+    }
+    let destination = PathBuf::from(&request.destination_path);
+    if !destination.is_absolute() {
+        return Err("请选择绝对保存路径".into());
+    }
+    let parent = destination
+        .parent()
+        .filter(|path| path.is_dir())
+        .ok_or_else(|| "保存目录不存在".to_string())?;
+    let extension = destination
+        .extension()
+        .and_then(|value| value.to_str())
+        .unwrap_or_default();
+    if !extension.eq_ignore_ascii_case(&request.format) {
+        return Err(format!("保存文件扩展名必须是 .{}", request.format));
+    }
+    let bytes = if request.format == "json" {
+        serde_json::to_vec_pretty(&serde_json::json!({
+            "timestamp_issues": request.issues,
+            "content_intervals": request.intervals,
+        }))
+        .map_err(|error| format!("生成 JSON 失败：{error}"))?
+    } else {
+        render_audio_evidence_csv(&request.issues, &request.intervals).into_bytes()
+    };
+    let unique = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |value| value.as_nanos());
+    let temporary = parent.join(format!(
+        ".streamscope-audio-evidence-{}-{unique}.tmp",
+        std::process::id()
+    ));
+    std::fs::write(&temporary, bytes).map_err(|error| format!("写入导出文件失败：{error}"))?;
+    if destination.exists() {
+        std::fs::remove_file(&destination).map_err(|error| format!("无法覆盖已有文件：{error}"))?;
+    }
+    std::fs::rename(&temporary, &destination).map_err(|error| {
+        let _ = std::fs::remove_file(&temporary);
+        format!("无法完成证据导出：{error}")
+    })?;
+    Ok(destination.display().to_string())
+}
+
+fn render_audio_evidence_csv(issues: &[AudioIssue], intervals: &[AudioQualityInterval]) -> String {
+    let mut output = String::from(
+        "\u{feff}record_type,kind,start_ms,end_ms,duration_ms,channel,previous_packet,current_packet,last_packet,previous_seq,current_seq,last_seq,expected_rtp_timestamp,actual_rtp_timestamp,delta_timestamp,previous_arrival_ms,current_arrival_ms,detail,precision\r\n",
+    );
+    for issue in issues {
+        let values = [
+            "timestamp_issue".to_string(),
+            issue.kind.clone(),
+            optional(issue.media_start_ms),
+            optional(issue.media_end_ms),
+            optional(issue.duration_ms),
+            String::new(),
+            optional(issue.previous_packet),
+            optional(issue.first_packet),
+            String::new(),
+            optional(issue.previous_rtp_sequence),
+            optional(issue.current_rtp_sequence),
+            String::new(),
+            optional(issue.expected_rtp_timestamp),
+            optional(issue.actual_rtp_timestamp),
+            optional(issue.delta_timestamp),
+            optional(issue.previous_offset_ms),
+            optional(issue.offset_ms),
+            issue.detail.clone(),
+            "rtp_timestamp+sequence_order".into(),
+        ];
+        output.push_str(&csv_row(&values));
+    }
+    for interval in intervals {
+        let values = [
+            "content_interval".to_string(),
+            interval.kind.clone(),
+            interval.start_ms.to_string(),
+            interval.end_ms.to_string(),
+            interval
+                .end_ms
+                .saturating_sub(interval.start_ms)
+                .to_string(),
+            optional(interval.channel),
+            String::new(),
+            optional(interval.first_packet),
+            optional(interval.last_packet),
+            String::new(),
+            optional(interval.first_rtp_sequence),
+            optional(interval.last_rtp_sequence),
+            String::new(),
+            String::new(),
+            String::new(),
+            String::new(),
+            String::new(),
+            interval.detail.clone(),
+            interval.precision.clone(),
+        ];
+        output.push_str(&csv_row(&values));
+    }
+    output
+}
+
+fn optional(value: Option<impl ToString>) -> String {
+    value.map(|value| value.to_string()).unwrap_or_default()
+}
+
+fn csv_row(values: &[String]) -> String {
+    let mut row = values
+        .iter()
+        .map(|value| format!("\"{}\"", value.replace('"', "\"\"")))
+        .collect::<Vec<_>>()
+        .join(",");
+    row.push_str("\r\n");
+    row
 }
 
 fn resolve_report_video_source(
@@ -1226,6 +1354,7 @@ pub fn run() {
             compare_rtsp,
             cancel_analysis,
             export_media,
+            export_audio_evidence,
             extract_video_frame,
             compare_video_reference,
             load_video_reference_comparison,
@@ -1261,6 +1390,44 @@ mod tests {
             frontend_file_path(Path::new(r"\\?\UNC\server\share\frame-0.png")),
             r"\\server\share\frame-0.png"
         );
+    }
+
+    #[test]
+    fn audio_evidence_csv_contains_exact_timestamp_and_content_locations() {
+        let csv = render_audio_evidence_csv(
+            &[AudioIssue {
+                kind: "timestamp_gap".into(),
+                detail: "缺口 160 ticks".into(),
+                first_packet: Some(12),
+                offset_ms: Some(40),
+                previous_packet: Some(11),
+                previous_offset_ms: Some(20),
+                previous_rtp_sequence: Some(100),
+                current_rtp_sequence: Some(101),
+                expected_rtp_timestamp: Some(160),
+                actual_rtp_timestamp: Some(320),
+                delta_timestamp: Some(160),
+                duration_ms: Some(20),
+                media_start_ms: Some(20),
+                media_end_ms: Some(40),
+            }],
+            &[AudioQualityInterval {
+                kind: "silence".into(),
+                start_ms: 500,
+                end_ms: 900,
+                channel: Some(1),
+                detail: "静音,候选".into(),
+                precision: "decoded_pcm_20ms_window".into(),
+                first_packet: Some(20),
+                last_packet: Some(25),
+                first_rtp_sequence: Some(110),
+                last_rtp_sequence: Some(115),
+            }],
+        );
+        assert!(csv.starts_with('\u{feff}'));
+        assert!(csv.contains("\"timestamp_gap\",\"20\",\"40\",\"20\""));
+        assert!(csv.contains("\"silence\",\"500\",\"900\",\"400\",\"1\""));
+        assert!(csv.contains("\"静音,候选\""));
     }
 
     fn frame_evidence(

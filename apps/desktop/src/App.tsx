@@ -410,6 +410,38 @@ function App() {
     }
   }
 
+  async function exportAudioEvidence(
+    issues: AudioIssueEvidence[],
+    intervals: AudioQualityIntervalEvidence[],
+    scope: string,
+  ) {
+    if (exporting || (issues.length === 0 && intervals.length === 0)) return;
+    setError("");
+    setExportMessage("");
+    const selected = await save({
+      defaultPath: `StreamScope-${selectedAudioTrack?.id ?? identity?.id ?? "audio"}-${scope}.csv`,
+      filters: [
+        { name: "CSV 表格", extensions: ["csv"] },
+        { name: "JSON 证据", extensions: ["json"] },
+      ],
+    });
+    if (!selected) return;
+    const lower = selected.toLowerCase();
+    const format = lower.endsWith(".json") ? "json" : "csv";
+    const destinationPath = lower.endsWith(`.${format}`) ? selected : `${selected}.${format}`;
+    setExporting(true);
+    try {
+      const exported = await invoke<string>("export_audio_evidence", {
+        request: { destinationPath, format, issues, intervals },
+      });
+      setExportMessage(`音频证据已导出：${exported}`);
+    } catch (reason) {
+      setError(`音频证据导出失败：${String(reason)}`);
+    } finally {
+      setExporting(false);
+    }
+  }
+
   return (
     <div className="app-shell">
       <aside className="sidebar">
@@ -656,7 +688,20 @@ function App() {
                         <Metric label="时间戳缺口 / 重叠" value={`${audio.timestamp_gap_count} / ${audio.timestamp_overlap_count}`} detail="独立于 RTP Sequence 统计" />
                         <Metric label="跨层映射" value={`${audio.sample_mappings?.length ?? 0} 条`} detail="RTP → AU → PCM 采样区间" />
                       </div>
-                      {audio.issues.map((issue, index) => <div className="evidence" key={`${issue.kind}-${index}`}><strong>{issue.kind}</strong><span>{issue.detail}</span></div>)}
+                      {audio.issues.some((issue) => issue.kind === "timestamp_gap" || issue.kind === "timestamp_overlap") && <div className="audio-timestamp-evidence">
+                        <div className="audio-evidence-heading">
+                          <div><strong>RTP 时间轴异常位置</strong><span>按去重后的扩展 Sequence 顺序比较期望时间戳与实际时间戳</span></div>
+                          <button type="button" disabled={exporting} onClick={() => { void exportAudioEvidence(audio.issues.filter((issue) => issue.kind === "timestamp_gap" || issue.kind === "timestamp_overlap"), [], "rtp-timestamp-issues"); }}>导出 CSV / JSON</button>
+                        </div>
+                        {audio.issues.filter((issue) => issue.kind === "timestamp_gap" || issue.kind === "timestamp_overlap").map((issue, index) => <div className="audio-timestamp-row" key={`${issue.kind}-${issue.first_packet}-${index}`}>
+                          <strong>{issue.kind === "timestamp_gap" ? "缺口" : "重叠"} · 媒体 {formatDuration(issue.media_start_ms)}–{formatDuration(issue.media_end_ms)} · {formatDuration(issue.duration_ms)}</strong>
+                          <span>抓包 #{issue.previous_packet ?? "—"} → #{issue.first_packet ?? "—"} · Seq {issue.previous_rtp_sequence ?? "—"} → {issue.current_rtp_sequence ?? "—"}</span>
+                          <span>期望 TS {issue.expected_rtp_timestamp ?? "—"}，实际 TS {issue.actual_rtp_timestamp ?? "—"}，差值 {issue.delta_timestamp ?? "—"} clock ticks</span>
+                          <small>到达偏移 {formatDuration(issue.previous_offset_ms)} → {formatDuration(issue.offset_ms)} · {issue.detail}</small>
+                        </div>)}
+                        <p className="capture-note">该定位对 PCMA/PCMU 使用“一码字一采样”精确推导；压缩编码只在具备可靠 AU 时长映射时才能作同等结论，零计数不代表压缩流一定没有时间轴异常。</p>
+                      </div>}
+                      {audio.issues.filter((issue) => issue.kind !== "timestamp_gap" && issue.kind !== "timestamp_overlap").map((issue, index) => <div className="evidence" key={`${issue.kind}-${index}`}><strong>{issue.kind}</strong><span>{issue.detail}</span></div>)}
                       {(audio.sample_mappings?.length ?? 0) > 0 && <details className="quality-method">
                         <summary>查看 RTP → Access Unit → PCM 映射</summary>
                         <div className="table-wrap"><table><thead><tr><th>包 / Seq</th><th>RTP 时间戳</th><th>AU</th><th>PCM 采样区间</th><th>精度</th></tr></thead><tbody>
@@ -807,6 +852,7 @@ function App() {
                       setView("playback");
                     }}
                     onExport={(startMs, endMs) => { void exportAudioSample({ startMs, endMs }); }}
+                    onExportEvidence={(intervals) => { void exportAudioEvidence([], intervals, "filtered-content-intervals"); }}
                     canExport={Boolean(audioExportSource) && !exporting}
                   />
                 </>}
@@ -1071,6 +1117,8 @@ function AudioTrackSelector({ tracks, selectedId, onChange }: { tracks: NonNulla
 }
 
 type AudioQuality = NonNullable<NonNullable<AnalysisRun["result"]["audio"]>["quality"]>;
+type AudioIssueEvidence = NonNullable<AnalysisRun["result"]["audio"]>["issues"][number];
+type AudioQualityIntervalEvidence = AudioQuality["intervals"][number];
 
 function formatMilli(value: number | null | undefined, unit: string): string {
   return value === null || value === undefined ? "—" : `${(value / 1_000).toFixed(1)} ${unit}`;
@@ -1086,7 +1134,35 @@ function LiveWaveform({ samples, decoding }: { samples: number[]; decoding: bool
   return <svg aria-label="实时 PCM 波形" className="live-waveform" preserveAspectRatio="none" viewBox="0 0 100 40"><line x1="0" x2="100" y1="20" y2="20" /><polyline points={points} /></svg>;
 }
 
-function AudioQualityView({ quality, onSeek, onExport, canExport }: { quality: AudioQuality; onSeek: (offsetMs: number) => void; onExport: (startMs: number, endMs: number) => void; canExport: boolean }) {
+function AudioQualityView({ quality, onSeek, onExport, onExportEvidence, canExport }: { quality: AudioQuality; onSeek: (offsetMs: number) => void; onExport: (startMs: number, endMs: number) => void; onExportEvidence: (intervals: AudioQualityIntervalEvidence[]) => void; canExport: boolean }) {
+  const [intervalQuery, setIntervalQuery] = useState("");
+  const [intervalKind, setIntervalKind] = useState("all");
+  const [intervalChannel, setIntervalChannel] = useState("all");
+  const [intervalStart, setIntervalStart] = useState("");
+  const [intervalEnd, setIntervalEnd] = useState("");
+  const intervalKinds = useMemo(() => [...new Set(quality.intervals.map((interval) => interval.kind))], [quality.intervals]);
+  const intervalChannels = useMemo(() => [...new Set(quality.intervals.map((interval) => interval.channel).filter((channel): channel is number => channel != null))].sort((left, right) => left - right), [quality.intervals]);
+  const filteredIntervals = useMemo(() => {
+    const query = intervalQuery.trim().toLocaleLowerCase();
+    const startMs = intervalStart.trim() === "" ? null : Number(intervalStart) * 1_000;
+    const endMs = intervalEnd.trim() === "" ? null : Number(intervalEnd) * 1_000;
+    return quality.intervals.filter((interval) => {
+      if (intervalKind !== "all" && interval.kind !== intervalKind) return false;
+      if (intervalChannel !== "all" && String(interval.channel ?? "all") !== intervalChannel) return false;
+      if (startMs != null && Number.isFinite(startMs) && interval.end_ms < startMs) return false;
+      if (endMs != null && Number.isFinite(endMs) && interval.start_ms > endMs) return false;
+      if (!query) return true;
+      const searchable = [
+        audioIntervalLabel(interval.kind), interval.kind, interval.detail, interval.precision,
+        interval.channel == null ? "全部声道" : `声道 ${interval.channel}`,
+        interval.first_packet == null ? "" : `包 ${interval.first_packet} #${interval.first_packet}`,
+        interval.last_packet == null ? "" : `包 ${interval.last_packet} #${interval.last_packet}`,
+        interval.first_rtp_sequence == null ? "" : `seq ${interval.first_rtp_sequence}`,
+        interval.last_rtp_sequence == null ? "" : `seq ${interval.last_rtp_sequence}`,
+      ].join(" ").toLocaleLowerCase();
+      return searchable.includes(query);
+    });
+  }, [quality.intervals, intervalQuery, intervalKind, intervalChannel, intervalStart, intervalEnd]);
   return (
     <div className="audio-quality-view">
       <div className="quality-summary metrics">
@@ -1115,8 +1191,19 @@ function AudioQualityView({ quality, onSeek, onExport, canExport }: { quality: A
       <AudioSpectrogramChart quality={quality} />
 
       <div className="audio-intervals">
-        <h3>内容异常区间</h3>
-        {quality.intervals.length === 0 ? <p>当前分析范围内没有达到阈值的静音、削波或电平突变候选。</p> : quality.intervals.map((interval, index) => (
+        <div className="audio-evidence-heading">
+          <div><h3>内容异常区间</h3><span>{filteredIntervals.length} / {quality.intervals.length} 条</span></div>
+          <button type="button" disabled={filteredIntervals.length === 0} onClick={() => onExportEvidence(filteredIntervals)}>导出筛选结果</button>
+        </div>
+        {quality.intervals.length > 0 && <div className="audio-interval-filters">
+          <label className="interval-search">搜索<input type="search" value={intervalQuery} placeholder="类型、详情、包号或 Seq" onChange={(event) => setIntervalQuery(event.target.value)} /></label>
+          <label>类型<select value={intervalKind} onChange={(event) => setIntervalKind(event.target.value)}><option value="all">全部类型</option>{intervalKinds.map((kind) => <option value={kind} key={kind}>{audioIntervalLabel(kind)}</option>)}</select></label>
+          <label>声道<select value={intervalChannel} onChange={(event) => setIntervalChannel(event.target.value)}><option value="all">全部声道</option>{intervalChannels.map((channel) => <option value={String(channel)} key={channel}>声道 {channel}</option>)}</select></label>
+          <label>开始秒<input type="number" min="0" step="0.1" value={intervalStart} placeholder="不限" onChange={(event) => setIntervalStart(event.target.value)} /></label>
+          <label>结束秒<input type="number" min="0" step="0.1" value={intervalEnd} placeholder="不限" onChange={(event) => setIntervalEnd(event.target.value)} /></label>
+          <button type="button" onClick={() => { setIntervalQuery(""); setIntervalKind("all"); setIntervalChannel("all"); setIntervalStart(""); setIntervalEnd(""); }}>清除筛选</button>
+        </div>}
+        {quality.intervals.length === 0 ? <p>当前分析范围内没有达到阈值的静音、削波或电平突变候选。</p> : filteredIntervals.length === 0 ? <p>没有符合当前搜索条件的异常区间。</p> : filteredIntervals.map((interval, index) => (
           <div className="audio-interval-row" key={`${interval.kind}-${interval.start_ms}-${index}`}>
             <button className="audio-interval-seek" type="button" onClick={() => onSeek(interval.start_ms)}>
               <strong>{audioIntervalLabel(interval.kind)} · 声道 {interval.channel ?? "全部"}</strong>

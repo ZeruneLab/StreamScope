@@ -1154,10 +1154,29 @@ fn render_audio_analysis(
         .issues
         .iter()
         .map(|issue| {
+            let location = if matches!(issue.kind.as_str(), "timestamp_gap" | "timestamp_overlap") {
+                format!(
+                    "<br><small>媒体 +{}–+{} ms（{} ms）；抓包 #{}→#{}；Seq {}→{}；期望/实际 RTP TS {} / {}；到达 +{}→+{} ms</small>",
+                    issue.media_start_ms.unwrap_or_default(),
+                    issue.media_end_ms.unwrap_or_default(),
+                    issue.duration_ms.unwrap_or_default(),
+                    issue.previous_packet.map(|value| value.to_string()).unwrap_or_else(|| "—".into()),
+                    issue.first_packet.map(|value| value.to_string()).unwrap_or_else(|| "—".into()),
+                    issue.previous_rtp_sequence.map(|value| value.to_string()).unwrap_or_else(|| "—".into()),
+                    issue.current_rtp_sequence.map(|value| value.to_string()).unwrap_or_else(|| "—".into()),
+                    issue.expected_rtp_timestamp.map(|value| value.to_string()).unwrap_or_else(|| "—".into()),
+                    issue.actual_rtp_timestamp.map(|value| value.to_string()).unwrap_or_else(|| "—".into()),
+                    issue.previous_offset_ms.map(|value| value.to_string()).unwrap_or_else(|| "—".into()),
+                    issue.offset_ms.map(|value| value.to_string()).unwrap_or_else(|| "—".into()),
+                )
+            } else {
+                String::new()
+            };
             format!(
-                "<li><strong>{}</strong>：{}</li>",
+                "<li><strong>{}</strong>：{}{}</li>",
                 escape_html(&issue.kind),
-                escape_html(&issue.detail)
+                escape_html(&issue.detail),
+                location,
             )
         })
         .collect::<Vec<_>>()
@@ -1193,8 +1212,15 @@ fn render_audio_analysis(
     let track_detail = track_detail
         .map(|detail| format!("<p>{}</p>", escape_html(detail)))
         .unwrap_or_default();
+    let timestamp_scope = if audio.codec.eq_ignore_ascii_case("pcma")
+        || audio.codec.eq_ignore_ascii_case("pcmu")
+    {
+        "时间轴缺口/重叠按相邻 RTP 包的 Sequence、时间戳和 G.711 负载采样数精确定位。"
+    } else {
+        "当前仅对 PCMA/PCMU 提供精确 RTP 时间轴缺口/重叠定位；压缩编码的零计数不代表不存在异常。"
+    };
     format!(
-        "<section><h2>{}</h2>{}<dl><dt>编码</dt><dd>{}</dd><dt>采样率 / 声道</dt><dd>{} Hz / {}</dd><dt>解码采样 / 时长</dt><dd>{} / {}</dd><dt>峰值 / RMS</dt><dd>{} / {} dBFS</dd><dt>RTP 时间戳缺口 / 重叠</dt><dd>{} / {}</dd><dt>跨层映射</dt><dd>{} 条</dd><dt>结论可信度</dt><dd class=\"{}\">{}</dd></dl><ul>{}</ul>{}{}</section>",
+        "<section><h2>{}</h2>{}<dl><dt>编码</dt><dd>{}</dd><dt>采样率 / 声道</dt><dd>{} Hz / {}</dd><dt>解码采样 / 时长</dt><dd>{} / {}</dd><dt>峰值 / RMS</dt><dd>{} / {} dBFS</dd><dt>RTP 时间戳缺口 / 重叠</dt><dd>{} / {}</dd><dt>跨层映射</dt><dd>{} 条</dd><dt>结论可信度</dt><dd class=\"{}\">{}</dd></dl><p><small>{}</small></p><ul>{}</ul>{}{}</section>",
         escape_html(heading),
         track_detail,
         escape_html(&audio.codec),
@@ -1226,6 +1252,7 @@ fn render_audio_analysis(
         } else {
             "证据不足，不输出确定性结论"
         },
+        timestamp_scope,
         issues,
         mapping_html,
         quality_html,
@@ -1915,6 +1942,8 @@ mod tests {
         assert!(html.contains("音频分析 · rtsp-track-3"));
         assert!(html.contains("Payload Type 8"));
         assert!(html.contains("Payload Type 111"));
+        assert!(html.contains("G.711 负载采样数精确定位"));
+        assert!(html.contains("压缩编码的零计数不代表不存在异常"));
     }
 
     #[test]

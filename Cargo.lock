@@ -3348,7 +3348,7 @@ checksum = "6ce2be8dc25455e1f91df71bfa12ad37d7af1092ae736f3a6cd0e37bc7810596"
 
 [[package]]
 name = "streamscope"
-version = "0.1.7"
+version = "0.1.8"
 dependencies = [
  "clap",
  "streamscope-analyzer",
@@ -3357,7 +3357,7 @@ dependencies = [
 
 [[package]]
 name = "streamscope-analyzer"
-version = "0.1.7"
+version = "0.1.8"
 dependencies = [
  "chrono",
  "serde",
@@ -3376,14 +3376,14 @@ dependencies = [
 
 [[package]]
 name = "streamscope-audio"
-version = "0.1.7"
+version = "0.1.8"
 dependencies = [
  "streamscope-core",
 ]
 
 [[package]]
 name = "streamscope-capture"
-version = "0.1.7"
+version = "0.1.8"
 dependencies = [
  "streamscope-audio",
  "streamscope-core",
@@ -3395,7 +3395,7 @@ dependencies = [
 
 [[package]]
 name = "streamscope-core"
-version = "0.1.7"
+version = "0.1.8"
 dependencies = [
  "serde",
  "thiserror 2.0.20",
@@ -3404,7 +3404,7 @@ dependencies = [
 
 [[package]]
 name = "streamscope-desktop"
-version = "0.1.7"
+version = "0.1.8"
 dependencies = [
  "serde",
  "serde_json",
@@ -3423,14 +3423,14 @@ dependencies = [
 
 [[package]]
 name = "streamscope-diagnostics"
-version = "0.1.7"
+version = "0.1.8"
 dependencies = [
  "streamscope-core",
 ]
 
 [[package]]
 name = "streamscope-ffmpeg"
-version = "0.1.7"
+version = "0.1.8"
 dependencies = [
  "serde",
  "serde_json",
@@ -3441,7 +3441,7 @@ dependencies = [
 
 [[package]]
 name = "streamscope-h264"
-version = "0.1.7"
+version = "0.1.8"
 dependencies = [
  "streamscope-core",
  "thiserror 2.0.20",
@@ -3449,7 +3449,7 @@ dependencies = [
 
 [[package]]
 name = "streamscope-h265"
-version = "0.1.7"
+version = "0.1.8"
 dependencies = [
  "streamscope-core",
  "thiserror 2.0.20",
@@ -3457,7 +3457,7 @@ dependencies = [
 
 [[package]]
 name = "streamscope-onvif"
-version = "0.1.7"
+version = "0.1.8"
 dependencies = [
  "base64 0.22.1",
  "chrono",
@@ -3473,7 +3473,7 @@ dependencies = [
 
 [[package]]
 name = "streamscope-report"
-version = "0.1.7"
+version = "0.1.8"
 dependencies = [
  "serde_json",
  "streamscope-core",
@@ -3482,7 +3482,7 @@ dependencies = [
 
 [[package]]
 name = "streamscope-rtp"
-version = "0.1.7"
+version = "0.1.8"
 dependencies = [
  "serde",
  "streamscope-core",
@@ -3491,7 +3491,7 @@ dependencies = [
 
 [[package]]
 name = "streamscope-rtsp"
-version = "0.1.7"
+version = "0.1.8"
 dependencies = [
  "base64 0.22.1",
  "md-5",
@@ -3506,7 +3506,7 @@ dependencies = [
 
 [[package]]
 name = "streamscope-sdp"
-version = "0.1.7"
+version = "0.1.8"
 dependencies = [
  "serde",
  "thiserror 2.0.20",
