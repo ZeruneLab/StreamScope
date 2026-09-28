@@ -54,6 +54,8 @@ StreamScope 是面向摄像头、NVR 和嵌入式音视频设备开发者的 RTS
 
 安装版运行不需要 PowerShell、Python、Rust、Cargo、Node.js 或 npm。详细检查和故障处理见 [`docs/runtime-requirements.md`](docs/runtime-requirements.md)。
 
+从 v0.1.9 起，安装版左侧栏底部提供“检查更新”和“启动时检查更新”。更新从 [ZeruneLab 的公开 GitHub Release](https://github.com/ZeruneLab/StreamScope/releases) 下载，无需 GitHub 账号；安装系统级更新时可能需要管理员确认。v0.1.8 及更早版本没有内置更新器，需先手动安装一次 v0.1.9。发布步骤与签名校验见 [`docs/auto-update.md`](docs/auto-update.md)。
+
 ### 开发构建
 
 - Rust 1.85 或更高版本（edition 2024）。
@@ -74,7 +76,7 @@ npm --version
 
 ### 直接使用桌面版
 
-已构建的程序位于：
+开发构建的程序位于：
 
 ```text
 target/release/streamscope-desktop.exe

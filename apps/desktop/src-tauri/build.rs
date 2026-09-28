@@ -196,7 +196,34 @@ fn main() {
     println!(
         "cargo:rerun-if-changed=../../../target/tool-cache/ffmpeg-9.0.1-streamscope-install/include/libavutil/video_enc_params.h"
     );
+    println!("cargo:rerun-if-changed=windows/app.manifest");
+    println!("cargo:rerun-if-changed=windows/app.rc");
     stage_ffmpeg();
     stage_video_worker();
-    tauri_build::build()
+    if std::env::var("TARGET").is_ok_and(|target| target.ends_with("windows-gnu")) {
+        tauri_build::try_build(
+            tauri_build::Attributes::new()
+                .windows_attributes(tauri_build::WindowsAttributes::new_without_app_manifest()),
+        )
+        .expect("无法生成 Tauri 构建资源");
+        let output = PathBuf::from(std::env::var_os("OUT_DIR").expect("OUT_DIR is set by Cargo"));
+        let manifest_resource = output.join("streamscope-manifest.o");
+        let status = Command::new("windres")
+            .args(["-i", "windows/app.rc", "-O", "coff", "-o"])
+            .arg(&manifest_resource)
+            .status()
+            .expect("无法启动 Windows 资源编译器");
+        assert!(status.success(), "无法编译 Windows 应用清单");
+        println!("cargo:rustc-link-arg={}", manifest_resource.display());
+        let target_dir = output
+            .ancestors()
+            .nth(3)
+            .expect("Cargo build output has a target profile directory");
+        copy_required(
+            &target_dir.join("WebView2Loader.dll"),
+            &target_dir.join("deps/WebView2Loader.dll"),
+        );
+    } else {
+        tauri_build::build();
+    }
 }

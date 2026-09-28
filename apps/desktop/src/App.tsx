@@ -4,6 +4,7 @@ import { listen } from "@tauri-apps/api/event";
 import { open, save } from "@tauri-apps/plugin-dialog";
 import { CaptureStreams } from "./CaptureStreams";
 import OnvifDiagnostics from "./OnvifDiagnostics";
+import { UpdateControl } from "./UpdateControl";
 import type {
   AnalysisProgress,
   AnalysisRun,
@@ -499,10 +500,7 @@ function App() {
           )}
         </div>
 
-        <div className="sidebar-footer">
-          <span className="online-dot" />本机分析引擎
-          <small>高级音画诊断 · v0.1.7</small>
-        </div>
+        <UpdateControl analysisRunning={running} />
       </aside>
 
       <main>

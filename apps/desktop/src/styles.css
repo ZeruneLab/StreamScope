@@ -55,6 +55,40 @@ nav { display: grid; gap: 6px; }
 .sidebar-footer { margin-top: auto; padding: 17px 10px 0; color: #8799ac; font-size: 11px; border-top: 1px solid #1d2c3c; }
 .sidebar-footer .online-dot { display: inline-block; margin: 0 8px 0 0; }
 .sidebar-footer small { display: block; margin: 5px 0 0 15px; color: #4f657a; }
+.updater-footer { display: grid; gap: 7px; }
+.updater-footer small { margin: 0 0 0 15px; overflow-wrap: anywhere; }
+.updater-footer button { width: 100%; padding: 7px 9px; color: #88bcea; font-size: 10px; border: 1px solid #294963; border-radius: 5px; background: #102b42; }
+.updater-footer button:hover:not(:disabled) { color: white; border-color: #3d759f; background: #173953; }
+.updater-footer button:disabled { cursor: default; opacity: .6; }
+.updater-footer label { display: flex; align-items: center; gap: 6px; margin-left: 15px; color: #61778b; font-size: 9px; }
+.updater-footer label input { margin: 0; }
+.updater-footer .update-message { color: #6f9fc7; }
+.updater-footer .update-error { color: #e28d93; }
+.update-overlay { position: fixed; inset: 0; z-index: 1000; display: grid; place-items: center; padding: 24px; background: rgba(5, 14, 24, .72); backdrop-filter: blur(3px); }
+.update-dialog { width: min(620px, 100%); max-height: min(720px, calc(100vh - 48px)); overflow-y: auto; color: #27394f; border: 1px solid #cad8e5; border-radius: 12px; background: #f8fafc; box-shadow: 0 22px 70px rgba(0, 0, 0, .32); }
+.update-dialog-heading { display: flex; align-items: flex-start; justify-content: space-between; gap: 20px; padding: 21px 24px 17px; color: white; background: linear-gradient(110deg, #102a44, #154c73); }
+.update-dialog-heading span { color: #73cae6; font-size: 9px; letter-spacing: 1.4px; }
+.update-dialog-heading h2 { margin: 4px 0 0; font-size: 20px; }
+.update-dialog-heading > button { padding: 0; color: #bcd2e3; font-size: 24px; border: 0; background: transparent; }
+.update-version-row { display: grid; grid-template-columns: repeat(3, 1fr); border-bottom: 1px solid #dce5ed; background: white; }
+.update-version-row > div { display: grid; gap: 5px; padding: 14px 18px; border-right: 1px solid #e3e9ef; }
+.update-version-row > div:last-child { border-right: 0; }
+.update-version-row span { color: #8492a2; font-size: 9px; }
+.update-version-row strong { color: #29415a; font-size: 11px; overflow-wrap: anywhere; }
+.update-notes { margin: 18px 22px 0; }
+.update-notes > strong { font-size: 12px; }
+.update-notes pre { max-height: 260px; margin: 9px 0 0; overflow: auto; padding: 13px 15px; color: #536579; font: 10px/1.65 system-ui, "Microsoft YaHei", sans-serif; white-space: pre-wrap; overflow-wrap: anywhere; border: 1px solid #dfe6ed; border-radius: 7px; background: white; }
+.update-progress { display: grid; gap: 7px; margin: 16px 22px 0; }
+.update-progress > div { height: 7px; overflow: hidden; border-radius: 20px; background: #dce5ed; }
+.update-progress > div span { display: block; height: 100%; background: linear-gradient(90deg, #2f80d0, #35b5ca); transition: width .2s ease; }
+.update-progress small { color: #65778a; font-size: 9px; }
+.update-warning { margin: 14px 22px 0; padding: 10px 12px; color: #875e22; font-size: 10px; line-height: 1.55; border: 1px solid #edd5ae; border-radius: 6px; background: #fff8eb; }
+.update-warning.error { color: #9b3740; border-color: #edc1c5; background: #fff3f4; }
+.update-actions { display: flex; justify-content: flex-end; gap: 9px; padding: 19px 22px 22px; }
+.update-actions button { padding: 9px 14px; color: white; font-size: 10px; border: 1px solid #176bc1; border-radius: 6px; background: #176bc1; }
+.update-actions button.secondary { color: #526a82; border-color: #cbd7e2; background: white; }
+.update-actions button:disabled { cursor: default; opacity: .55; }
+@media (max-width: 700px) { .update-version-row { grid-template-columns: 1fr; } .update-version-row > div { border-right: 0; border-bottom: 1px solid #e3e9ef; } .update-version-row > div:last-child { border-bottom: 0; } .update-actions { flex-wrap: wrap; } }
 
 main { grid-column: 2; min-width: 0; }
 .topbar { min-height: 152px; display: flex; align-items: flex-start; justify-content: space-between; padding: 34px 44px 28px; color: white; background: linear-gradient(108deg, #0c1a2c, #102b45 70%, #0a1a2c); border-bottom: 1px solid #243b53; }
