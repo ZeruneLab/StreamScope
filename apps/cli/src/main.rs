@@ -20,6 +20,13 @@ struct Cli {
 
 #[derive(Debug, Subcommand)]
 enum Commands {
+    /// 分析 PCAP/PCAPNG 中的 SIP 信令、事务、呼叫和 SDP 媒体关联
+    Sip {
+        #[arg(long)]
+        pcap: PathBuf,
+        #[arg(long)]
+        output: Option<PathBuf>,
+    },
     /// 分析 RTSP 地址、Annex B H.264/H.265、音频或抓包文件并生成报告
     #[command(group(ArgGroup::new("input").required(true).multiple(false).args(["url", "h264", "h265", "audio", "pcap"])))]
     Analyze {
@@ -75,6 +82,22 @@ impl From<TransportArgument> for Transport {
 
 fn main() {
     let exit_code = match Cli::parse().command {
+        Commands::Sip { pcap, output } => {
+            let result = streamscope_sip::analyze_pcap(&pcap)
+                .map_err(|error| error.to_string())
+                .and_then(|report| {
+                    serde_json::to_string_pretty(&report).map_err(|error| error.to_string())
+                });
+            result.and_then(|json| {
+                if let Some(path) = output {
+                    std::fs::write(&path, json).map_err(|error| error.to_string())?;
+                    println!("SIP JSON：{}", path.display());
+                } else {
+                    println!("{json}");
+                }
+                Ok(())
+            })
+        }
         Commands::Analyze {
             url,
             h264,

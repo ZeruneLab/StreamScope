@@ -25,6 +25,7 @@ streamscope-ffmpeg = { path = "../../../crates/ffmpeg" }
 streamscope-h264 = { path = "../../../crates/h264" }
 streamscope-h265 = { path = "../../../crates/h265" }
 streamscope-onvif = { path = "../../../crates/onvif" }
+streamscope-sip = { path = "../../../crates/sip" }
 streamscope-report = { path = "../../../crates/report" }
 tauri = { version = "2", features = ["protocol-asset"] }
 tauri-plugin-dialog = "2"

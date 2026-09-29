@@ -1,6 +1,7 @@
 [workspace]
 members = [
     "apps/cli",
+    "apps/sip-engine",
     "apps/desktop/src-tauri",
     "crates/analyzer",
     "crates/audio",
@@ -15,11 +16,12 @@ members = [
     "crates/rtp",
     "crates/rtsp",
     "crates/sdp",
+    "crates/sip",
 ]
 resolver = "2"
 
 [workspace.package]
-version = "0.1.9"
+version = "0.1.10"
 edition = "2024"
 license = "MIT"
 
@@ -37,4 +39,8 @@ percent-encoding = "2.3.2"
 quick-xml = "0.42.0"
 reqwest = { version = "0.12.23", default-features = false, features = ["blocking", "rustls-tls-native-roots"] }
 sha1 = "0.10.6"
+sha2 = "0.10.9"
+rustls = "0.23.45"
+rustls-pemfile = "2.2.0"
+rustls-native-certs = "0.8.4"
 uuid = { version = "1.18.1", features = ["v4"] }

@@ -5,6 +5,12 @@ use url::Url;
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 pub struct SdpSession {
     pub session_name: Option<String>,
+    #[serde(default)]
+    pub origin_session_id: Option<String>,
+    #[serde(default)]
+    pub origin_session_version: Option<String>,
+    #[serde(default)]
+    pub connection_address: Option<String>,
     pub control: Option<String>,
     pub range: Option<String>,
     pub attributes: BTreeMap<String, Vec<String>>,
@@ -14,6 +20,8 @@ pub struct SdpSession {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct SdpMedia {
     pub media_type: String,
+    #[serde(default)]
+    pub connection_address: Option<String>,
     pub port: u16,
     pub protocol: String,
     pub payload_types: Vec<u8>,
@@ -65,7 +73,24 @@ pub fn parse_sdp(input: &str) -> Result<SdpSession, SdpError> {
         }
         match kind {
             "v" => saw_version = true,
+            "o" if current_media.is_none() => {
+                let mut parts = value.split_whitespace();
+                let _username = parts.next();
+                session.origin_session_id = parts.next().map(str::to_string);
+                session.origin_session_version = parts.next().map(str::to_string);
+            }
             "s" if current_media.is_none() => session.session_name = Some(value.into()),
+            "c" => {
+                let address = value
+                    .split_whitespace()
+                    .nth(2)
+                    .map(|value| value.split('/').next().unwrap_or(value).to_string());
+                if let Some(media_index) = current_media {
+                    session.media[media_index].connection_address = address;
+                } else {
+                    session.connection_address = address;
+                }
+            }
             "m" => {
                 session.media.push(parse_media(value, line_number)?);
                 current_media = Some(session.media.len() - 1);
@@ -116,6 +141,7 @@ fn parse_media(value: &str, line: usize) -> Result<SdpMedia, SdpError> {
         .collect::<Result<Vec<_>, _>>()?;
     Ok(SdpMedia {
         media_type: parts[0].into(),
+        connection_address: None,
         port,
         protocol: parts[2].into(),
         payload_types,
@@ -245,5 +271,26 @@ mod tests {
             parse_sdp("s=Missing version\r\n"),
             Err(SdpError::MissingVersion)
         );
+    }
+
+    #[test]
+    fn media_connection_overrides_session_connection() {
+        let session = parse_sdp("v=0\r\nc=IN IP4 10.0.0.1\r\nm=audio 10000 RTP/AVP 0\r\nm=video 10002 RTP/AVP 96\r\nc=IN IP4 10.0.0.2\r\na=rtpmap:96 H264/90000\r\n").unwrap();
+        assert_eq!(session.connection_address.as_deref(), Some("10.0.0.1"));
+        assert_eq!(session.media[0].connection_address, None);
+        assert_eq!(
+            session.media[1].connection_address.as_deref(),
+            Some("10.0.0.2")
+        );
+    }
+
+    #[test]
+    fn preserves_origin_version_for_renegotiation() {
+        let session = parse_sdp(
+            "v=0\r\no=- 12345 7 IN IP4 10.0.0.1\r\ns=Call\r\nm=audio 10000 RTP/AVP 0\r\n",
+        )
+        .unwrap();
+        assert_eq!(session.origin_session_id.as_deref(), Some("12345"));
+        assert_eq!(session.origin_session_version.as_deref(), Some("7"));
     }
 }

@@ -184,6 +184,56 @@ fn stage_video_worker() {
     }
 }
 
+fn stage_sip_engine() {
+    let target = std::env::var("TARGET").expect("TARGET is set by Cargo");
+    let manifest = PathBuf::from(std::env::var_os("CARGO_MANIFEST_DIR").unwrap());
+    let root = manifest.join("../../..");
+    let extension = if target.contains("windows") {
+        ".exe"
+    } else {
+        ""
+    };
+    let executable = format!("streams-sip-engine-{target}{extension}");
+    let staged = manifest.join("binaries").join(executable);
+    let sources = [
+        root.join("apps/sip-engine/src/main.rs"),
+        root.join("apps/sip-engine/Cargo.toml"),
+        root.join("crates/sip/src/lib.rs"),
+        root.join("crates/sip/src/message.rs"),
+    ];
+    for source in &sources {
+        println!("cargo:rerun-if-changed={}", source.display());
+    }
+    let stale = !staged.is_file()
+        || sources.iter().any(|source| {
+            source
+                .metadata()
+                .and_then(|metadata| metadata.modified())
+                .ok()
+                > staged
+                    .metadata()
+                    .and_then(|metadata| metadata.modified())
+                    .ok()
+        });
+    if !stale {
+        return;
+    }
+    let isolated = root.join("target/sip-engine-stage");
+    let status = Command::new(std::env::var_os("CARGO").unwrap_or_else(|| "cargo".into()))
+        .current_dir(&root)
+        .env("CARGO_TARGET_DIR", &isolated)
+        .args(["build", "--release", "-p", "streams-sip-engine"])
+        .status()
+        .unwrap_or_else(|error| panic!("无法启动 SIP Engine 构建：{error}"));
+    assert!(status.success(), "独立 SIP Engine 构建失败");
+    copy_required(
+        &isolated
+            .join("release")
+            .join(format!("streams-sip-engine{extension}")),
+        &staged,
+    );
+}
+
 fn main() {
     println!("cargo:rerun-if-env-changed=PATH");
     println!("cargo:rerun-if-env-changed=STREAMSCOPE_FFMPEG_DIR");
@@ -200,6 +250,7 @@ fn main() {
     println!("cargo:rerun-if-changed=windows/app.rc");
     stage_ffmpeg();
     stage_video_worker();
+    stage_sip_engine();
     if std::env::var("TARGET").is_ok_and(|target| target.ends_with("windows-gnu")) {
         tauri_build::try_build(
             tauri_build::Attributes::new()

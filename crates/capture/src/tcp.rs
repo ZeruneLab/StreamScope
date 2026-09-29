@@ -6,14 +6,14 @@ const MAX_PENDING_SEGMENTS: usize = 256;
 const MAX_MESSAGE_BYTES: usize = 256 * 1024;
 
 #[derive(Debug)]
-pub(crate) struct Chunk {
+pub struct Chunk {
     pub data: Vec<u8>,
     pub meta: FrameMeta,
     pub discontinuity: bool,
 }
 
 #[derive(Default)]
-pub(crate) struct Reassembly {
+pub struct Reassembly {
     anchor: Option<u32>,
     expected: Option<i64>,
     pending: BTreeMap<i64, Chunk>,

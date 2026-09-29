@@ -91,6 +91,69 @@ pub fn parse_rtp(input: &[u8]) -> Result<RtpPacket<'_>, RtpError> {
     })
 }
 
+/// Serialize the fixed RTP header used by generated test media.
+pub fn encode_rtp(
+    payload_type: u8,
+    marker: bool,
+    sequence: u16,
+    timestamp: u32,
+    ssrc: u32,
+    payload: &[u8],
+) -> Vec<u8> {
+    let mut bytes = Vec::with_capacity(12 + payload.len());
+    bytes.extend_from_slice(&[0x80, (payload_type & 0x7f) | if marker { 0x80 } else { 0 }]);
+    bytes.extend_from_slice(&sequence.to_be_bytes());
+    bytes.extend_from_slice(&timestamp.to_be_bytes());
+    bytes.extend_from_slice(&ssrc.to_be_bytes());
+    bytes.extend_from_slice(payload);
+    bytes
+}
+
+/// A compound RTCP sender report followed by SDES CNAME.
+pub fn encode_rtcp_sender_report(
+    ssrc: u32,
+    ntp_seconds: u32,
+    ntp_fraction: u32,
+    rtp_timestamp: u32,
+    packet_count: u32,
+    octet_count: u32,
+    cname: &str,
+) -> Vec<u8> {
+    let mut bytes = vec![0x80, 200, 0, 6];
+    for value in [
+        ssrc,
+        ntp_seconds,
+        ntp_fraction,
+        rtp_timestamp,
+        packet_count,
+        octet_count,
+    ] {
+        bytes.extend_from_slice(&value.to_be_bytes());
+    }
+    let cname = &cname.as_bytes()[..cname.len().min(255)];
+    let sdes_start = bytes.len();
+    bytes.extend_from_slice(&[0x81, 202, 0, 0]);
+    bytes.extend_from_slice(&ssrc.to_be_bytes());
+    bytes.extend_from_slice(&[1, cname.len() as u8]);
+    bytes.extend_from_slice(cname);
+    bytes.push(0);
+    while (bytes.len() - sdes_start) % 4 != 0 {
+        bytes.push(0);
+    }
+    let words = ((bytes.len() - sdes_start) / 4 - 1) as u16;
+    bytes[sdes_start + 2..sdes_start + 4].copy_from_slice(&words.to_be_bytes());
+    bytes
+}
+
+/// A compound RTCP empty receiver report followed by BYE.
+pub fn encode_rtcp_goodbye(ssrc: u32) -> Vec<u8> {
+    let mut bytes = vec![0x80, 201, 0, 1];
+    bytes.extend_from_slice(&ssrc.to_be_bytes());
+    bytes.extend_from_slice(&[0x81, 203, 0, 1]);
+    bytes.extend_from_slice(&ssrc.to_be_bytes());
+    bytes
+}
+
 #[derive(Debug)]
 pub struct RtpTracker {
     statistics: RtpStatistics,
@@ -461,6 +524,41 @@ mod tests {
         assert_eq!(parsed.payload_type, 96);
         assert_eq!(parsed.sequence, 42);
         assert_eq!(parsed.payload, &[0x65, 1, 2, 3]);
+    }
+
+    #[test]
+    fn generated_rtp_and_compound_rtcp_round_trip() {
+        let rtp = encode_rtp(0, true, 42, 8000, 0x1234_5678, &[0xff; 160]);
+        let parsed = parse_rtp(&rtp).unwrap();
+        assert_eq!(parsed.payload_type, 0);
+        assert_eq!(parsed.sequence, 42);
+        assert_eq!(parsed.timestamp, 8000);
+        assert_eq!(parsed.ssrc, 0x1234_5678);
+        assert_eq!(parsed.payload.len(), 160);
+        let sr = encode_rtcp_sender_report(0x1234_5678, 10, 20, 8000, 1, 160, "test-source");
+        assert_eq!(
+            parse_rtcp_compound(&sr).unwrap(),
+            vec![
+                RtcpPacket::SenderReport {
+                    ssrc: 0x1234_5678,
+                    ntp_seconds: 10,
+                    ntp_fraction: 20,
+                    rtp_timestamp: 8000,
+                    sender_packet_count: 1,
+                    sender_octet_count: 160,
+                },
+                RtcpPacket::SourceDescription {
+                    chunks: vec![RtcpSdesChunk {
+                        ssrc: 0x1234_5678,
+                        cname: Some("test-source".into()),
+                    }],
+                },
+            ]
+        );
+        assert!(matches!(
+            parse_rtcp_compound(&encode_rtcp_goodbye(0x1234_5678)).unwrap()[1],
+            RtcpPacket::Goodbye { .. }
+        ));
     }
 
     #[test]

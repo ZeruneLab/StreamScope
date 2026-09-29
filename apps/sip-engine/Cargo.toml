@@ -1,0 +1,25 @@
+[package]
+name = "streams-sip-engine"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "streams-sip-engine"
+path = "src/main.rs"
+
+[dependencies]
+clap.workspace = true
+serde_json.workspace = true
+serde.workspace = true
+streamscope-sip = { path = "../../crates/sip" }
+streamscope-sdp = { path = "../../crates/sdp" }
+streamscope-rtp = { path = "../../crates/rtp" }
+streamscope-audio = { path = "../../crates/audio" }
+rustls.workspace = true
+rustls-pemfile.workspace = true
+rustls-native-certs.workspace = true
+uuid.workspace = true
+
+[dev-dependencies]
+rcgen = "0.14.10"

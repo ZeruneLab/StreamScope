@@ -3,6 +3,9 @@ mod reader;
 mod sdp;
 mod tcp;
 
+pub use reader::FrameMeta as CaptureFrameMeta;
+pub use tcp::{Chunk as TcpChunk, Reassembly as TcpReassembly};
+
 use network::{Endpoint, Payload};
 use reader::FrameMeta;
 use sdp::{Codec, Session, UdpBinding};
@@ -42,6 +45,73 @@ pub enum CaptureError {
     Invalid(&'static str),
     #[error("分析任务已由用户取消")]
     Cancelled,
+}
+
+/// Visit UDP and TCP payloads using the same PCAP/PCAPNG and network decoders as media analysis.
+/// Payloads borrow the current frame and must not be retained by the callback.
+pub enum TransportPayload<'a> {
+    Udp(&'a [u8]),
+    Tcp {
+        sequence: u32,
+        flags: u8,
+        data: &'a [u8],
+    },
+}
+
+pub struct TransportPacket<'a> {
+    pub meta: CaptureFrameMeta,
+    pub source: std::net::SocketAddr,
+    pub destination: std::net::SocketAddr,
+    pub payload: TransportPayload<'a>,
+}
+
+#[derive(Default)]
+pub struct TransportVisitStats {
+    pub total_frames: u64,
+    pub skipped_network_frames: u64,
+    pub first_skip_reason: Option<&'static str>,
+}
+
+pub fn visit_transport_packets(
+    path: &Path,
+    mut consume: impl FnMut(TransportPacket<'_>) -> Result<(), CaptureError>,
+) -> Result<TransportVisitStats, CaptureError> {
+    let mut stats = TransportVisitStats::default();
+    reader::read_capture(BufReader::new(File::open(path)?), |frame| {
+        stats.total_frames += 1;
+        match network::parse_network(&frame.data, frame.link_type) {
+            Ok(Some(packet)) => {
+                let payload = match packet.transport {
+                    Payload::Udp(data) => TransportPayload::Udp(data),
+                    Payload::Tcp {
+                        sequence,
+                        flags,
+                        data,
+                    } => TransportPayload::Tcp {
+                        sequence,
+                        flags,
+                        data,
+                    },
+                };
+                consume(TransportPacket {
+                    meta: frame.meta,
+                    source: std::net::SocketAddr::new(packet.source.ip, packet.source.port),
+                    destination: std::net::SocketAddr::new(
+                        packet.destination.ip,
+                        packet.destination.port,
+                    ),
+                    payload,
+                })?;
+            }
+            Err(reason) => {
+                stats.skipped_network_frames += 1;
+                stats.first_skip_reason.get_or_insert(reason);
+            }
+            Ok(None) => {}
+        }
+        Ok(())
+    })?;
+    Ok(stats)
 }
 
 #[derive(Debug)]

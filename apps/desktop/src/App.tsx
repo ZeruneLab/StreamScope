@@ -4,6 +4,7 @@ import { listen } from "@tauri-apps/api/event";
 import { open, save } from "@tauri-apps/plugin-dialog";
 import { CaptureStreams } from "./CaptureStreams";
 import OnvifDiagnostics from "./OnvifDiagnostics";
+import SipDiagnostics from "./SipDiagnostics";
 import { UpdateControl } from "./UpdateControl";
 import type {
   AnalysisProgress,
@@ -21,7 +22,7 @@ import type {
 } from "./types";
 
 type View = "overview" | "playback" | "audioQuality" | "protocol" | "stream" | "videoDeep" | "diagnostics" | "timeline" | "report" | "log";
-type InputMode = "rtsp" | "h264" | "h265" | "audio" | "pcap" | "onvif";
+type InputMode = "rtsp" | "h264" | "h265" | "audio" | "pcap" | "onvif" | "sip";
 type TransportMode = "tcp" | "udp" | "compare";
 type AudioExportFormat = "wav" | "mp3" | "m4a" | "flac" | "ogg";
 
@@ -477,6 +478,9 @@ function App() {
           <button className={`nav-item ${inputMode === "onvif" ? "active" : ""}`} type="button" onClick={() => { setInputMode("onvif"); setOfflinePath(""); }}>
             <span className="nav-icon">◎</span>ONVIF 诊断
           </button>
+          <button className={`nav-item ${inputMode === "sip" ? "active" : ""}`} type="button" onClick={() => { setInputMode("sip"); setOfflinePath(""); }}>
+            <span className="nav-icon">◉</span>SIP 诊断
+          </button>
         </nav>
 
         <div className="history">
@@ -506,9 +510,9 @@ function App() {
       <main>
         <header className="topbar">
           <div>
-            <p className="eyebrow">{inputMode === "onvif" ? "ONVIF DEVICE INSPECTOR" : "RTSP INSPECTOR"}</p>
-            <h1>{inputMode === "onvif" ? "ONVIF 设备诊断" : inputMode === "pcap" ? "多流抓包诊断" : inputMode === "h264" ? "H.264 文件诊断" : inputMode === "h265" ? "H.265 文件诊断" : inputMode === "audio" ? "音频文件诊断" : "实时流诊断"}</h1>
-            <p>{inputMode === "onvif" ? "按标准服务链验证设备能力，并把媒体入口交给现有 RTSP/RTP 分析器。" : inputMode === "pcap" ? "发现抓包中的媒体流，独立查看每路的网络与码流证据。" : "验证媒体参数与实际解码结果。"}</p>
+            <p className="eyebrow">{inputMode === "onvif" ? "ONVIF DEVICE INSPECTOR" : inputMode === "sip" ? "SIP SIGNALING INSPECTOR" : "RTSP INSPECTOR"}</p>
+            <h1>{inputMode === "onvif" ? "ONVIF 设备诊断" : inputMode === "sip" ? "SIP 信令诊断" : inputMode === "pcap" ? "多流抓包诊断" : inputMode === "h264" ? "H.264 文件诊断" : inputMode === "h265" ? "H.265 文件诊断" : inputMode === "audio" ? "音频文件诊断" : "实时流诊断"}</h1>
+            <p>{inputMode === "onvif" ? "按标准服务链验证设备能力，并把媒体入口交给现有 RTSP/RTP 分析器。" : inputMode === "sip" ? "从抓包还原 SIP 事务、呼叫、SDP 和 RTP 关联证据。" : inputMode === "pcap" ? "发现抓包中的媒体流，独立查看每路的网络与码流证据。" : "验证媒体参数与实际解码结果。"}</p>
           </div>
           <div className={`health-pill ${health.className}`}>
             <span />{health.label}
@@ -517,7 +521,8 @@ function App() {
 
         <section className="workspace">
           {inputMode === "onvif" && <OnvifDiagnostics onAnalyzeRtsp={(streamUri) => { setUrl(streamUri); setInputMode("rtsp"); setRun(null); setError(""); }} />}
-          <form className={`analysis-form panel ${inputMode === "onvif" ? "mode-hidden" : ""}`} onSubmit={submit}>
+          {inputMode === "sip" && <SipDiagnostics onAnalyzeMedia={(path) => { setOfflinePath(path); setInputMode("pcap"); setRun(null); setError(""); }} />}
+          <form className={`analysis-form panel ${inputMode === "onvif" || inputMode === "sip" ? "mode-hidden" : ""}`} onSubmit={submit}>
             <div className="panel-heading">
               <div>
                 <span className="step">01</span>
@@ -619,9 +624,9 @@ function App() {
             )}
           </form>
 
-          {inputMode !== "onvif" && error && <div className="error-banner"><strong>无法开始分析</strong>{error}</div>}
+          {inputMode !== "onvif" && inputMode !== "sip" && error && <div className="error-banner"><strong>无法开始分析</strong>{error}</div>}
 
-          <section className={`results panel ${run ? "has-result" : ""} ${inputMode === "onvif" ? "mode-hidden" : ""}`}>
+          <section className={`results panel ${run ? "has-result" : ""} ${inputMode === "onvif" || inputMode === "sip" ? "mode-hidden" : ""}`}>
             <div className="panel-heading results-heading">
               <div>
                 <span className="step">02</span>

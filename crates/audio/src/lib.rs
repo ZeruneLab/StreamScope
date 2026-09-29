@@ -1448,6 +1448,18 @@ fn decode_alaw(value: u8) -> i16 {
     }
 }
 
+/// Encode one PCM sample as G.711 PCMU for generated test media.
+pub fn encode_mulaw(sample: i16) -> u8 {
+    let sign = if sample < 0 { 0x80 } else { 0 };
+    let magnitude = i32::from(sample).abs().min(32_635) + 0x84;
+    let mut segment = 0_u8;
+    while segment < 7 && magnitude > ((0x100 << segment) - 1) {
+        segment += 1;
+    }
+    let mantissa = ((magnitude >> (u32::from(segment) + 3)) & 0x0f) as u8;
+    !(sign | (segment << 4) | mantissa)
+}
+
 fn decode_mulaw(value: u8) -> i16 {
     let value = !value;
     let sign = value & 0x80;
@@ -1464,6 +1476,14 @@ fn decode_mulaw(value: u8) -> i16 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn generated_pcmu_tone_samples_decode_with_expected_polarity() {
+        assert_eq!(encode_mulaw(0), 0xff);
+        assert!(decode_mulaw(encode_mulaw(10_000)) > 0);
+        assert!(decode_mulaw(encode_mulaw(-10_000)) < 0);
+        assert!((i32::from(decode_mulaw(encode_mulaw(10_000))) - 10_000).abs() < 1_000);
+    }
 
     #[test]
     fn g711_analysis_detects_timestamp_gap_and_decodes_samples() {

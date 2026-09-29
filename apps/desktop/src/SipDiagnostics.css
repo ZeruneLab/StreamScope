@@ -1,0 +1,30 @@
+.sip-diagnostics { display: grid; gap: 20px; }
+.sip-input, .sip-results { padding: 24px; }
+.sip-actions { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 8px; margin-top: 10px; }
+.sip-actions button { border: 1px solid #a4c8e6; border-radius: 6px; background: #eef7ff; color: #1467a9; padding: 8px 12px; cursor: pointer; }
+.sip-input > p { color: #61738c; margin: 14px 0; }
+.sip-input .analyze-button { display: block; margin: 18px 0 0 auto; }
+.sip-section { margin-top: 24px; }
+.sip-section h3 { margin: 0 0 10px; }
+.sip-section > input { width: min(100%, 320px); padding: 8px 10px; border: 1px solid #c7d4e5; border-radius: 6px; }
+.sip-call-list { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 10px; }
+.sip-call-list button { display: grid; gap: 3px; text-align: left; border: 1px solid #c7d4e5; background: white; border-radius: 6px; padding: 8px 12px; cursor: pointer; }
+.sip-call-list button.selected { border-color: #1683d5; background: #eaf6fd; }
+.sip-call-list span { color: #61738c; font-size: 12px; }
+.sip-finding { display: flex; gap: 12px; border: 1px solid #d7e1eb; border-left: 3px solid #58a6df; border-radius: 5px; padding: 9px 12px; margin-bottom: 6px; }
+.sip-finding.warn { border-left-color: #e69632; }
+.sip-finding strong { min-width: 160px; }
+.sip-table-wrap { overflow-x: auto; max-height: 440px; overflow-y: auto; }
+.sip-table-wrap table { width: 100%; border-collapse: collapse; font-size: 13px; }
+.sip-table-wrap th, .sip-table-wrap td { padding: 9px; border-bottom: 1px solid #e3eaf1; text-align: left; white-space: nowrap; }
+.sip-table-wrap th { background: #f0f5fa; position: sticky; top: 0; }
+.sip-step-input { width: 82px; padding: 5px; border: 1px solid #c7d4e5; border-radius: 5px; }
+.sip-notice { color: #61738c; font-size: 12px; }
+.sip-simulator-controls { display: flex; align-items: end; gap: 12px; flex-wrap: wrap; }
+.sip-simulator-controls label { display: grid; gap: 6px; }
+.sip-simulator-controls input { border: 1px solid #c7d4e5; border-radius: 6px; padding: 9px; min-width: 210px; }
+.sip-simulator-controls select { border: 1px solid #c7d4e5; border-radius: 6px; padding: 9px; min-width: 210px; }
+.sip-simulator-controls button { border: 0; border-radius: 6px; padding: 10px 18px; background: #176fbe; color: white; cursor: pointer; }
+.sip-simulator-controls button:disabled { opacity: .5; cursor: default; }
+.sip-running { color: #18734b !important; }
+.sip-engine-events { overflow: auto; max-height: 240px; background: #10233a; color: #c6e6ff; padding: 12px; border-radius: 6px; }

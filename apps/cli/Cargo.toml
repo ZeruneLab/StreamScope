@@ -12,3 +12,5 @@ path = "src/main.rs"
 clap.workspace = true
 streamscope-analyzer = { path = "../../crates/analyzer" }
 streamscope-core = { path = "../../crates/core" }
+streamscope-sip = { path = "../../crates/sip" }
+serde_json.workspace = true

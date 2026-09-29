@@ -1,6 +1,9 @@
 use serde::{Deserialize, Serialize};
 use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
+use std::process::{Child, Command, Stdio};
+use std::sync::Mutex;
+use std::time::{Duration, Instant};
 use streamscope_analyzer::{
     AnalysisRun, AnalyzeOptions, AudioFileOptions, GeneratedReports, H264FileOptions,
     H265FileOptions, PcapFileOptions,
@@ -49,6 +52,215 @@ struct ExportAudioEvidenceRequest {
     format: String,
     issues: Vec<AudioIssue>,
     intervals: Vec<AudioQualityInterval>,
+}
+
+#[derive(Default)]
+struct SipEngineState(Mutex<Option<(Child, String)>>);
+
+fn sip_engine_executable() -> Result<PathBuf, String> {
+    let executable = std::env::current_exe()
+        .map_err(|error| error.to_string())?
+        .with_file_name(if cfg!(windows) {
+            "streams-sip-engine.exe"
+        } else {
+            "streams-sip-engine"
+        });
+    #[cfg(debug_assertions)]
+    let executable = if executable.is_file() {
+        executable
+    } else {
+        Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../../target/debug")
+            .join(if cfg!(windows) {
+                "streams-sip-engine.exe"
+            } else {
+                "streams-sip-engine"
+            })
+    };
+    Ok(executable)
+}
+
+#[tauri::command]
+fn start_sip_simulator(
+    app: tauri::AppHandle,
+    state: tauri::State<'_, SipEngineState>,
+    bind: String,
+    scenario: String,
+    transport: String,
+    username: String,
+    password: String,
+    digest: String,
+    tls_cert: String,
+    tls_key: String,
+) -> Result<String, String> {
+    let address: std::net::SocketAddr = bind
+        .parse()
+        .map_err(|_| "监听地址必须为 IP:端口，例如 127.0.0.1:5060".to_string())?;
+    if scenario != "options" && scenario != "busy" && scenario != "registrar" && scenario != "call"
+    {
+        return Err("SIP 模拟场景无效".into());
+    }
+    if transport != "udp" && transport != "tcp" && transport != "tls" {
+        return Err("SIP 模拟传输仅支持 UDP、TCP 或 TLS".into());
+    }
+    if scenario == "call" && transport != "udp" {
+        return Err("PCMU 测试呼叫当前仅支持 UDP 信令".into());
+    }
+    if transport == "tls" && (!Path::new(&tls_cert).is_file() || !Path::new(&tls_key).is_file()) {
+        return Err("TLS 场景需要选择现有的 PEM 证书和私钥文件".into());
+    }
+    if scenario == "registrar" && (username.is_empty() || password.is_empty()) {
+        return Err("Registrar 场景需要测试账号和密码".into());
+    }
+    if digest != "sha256" && digest != "md5" {
+        return Err("Digest 算法无效".into());
+    }
+    let mut guard = state
+        .0
+        .lock()
+        .map_err(|_| "SIP Engine 状态锁异常".to_string())?;
+    if let Some((child, _)) = guard.as_mut() {
+        if child
+            .try_wait()
+            .map_err(|error| error.to_string())?
+            .is_none()
+        {
+            return Err("SIP 模拟器已经运行".into());
+        }
+        *guard = None;
+    }
+    let executable = sip_engine_executable()?;
+    let mut command = Command::new(&executable);
+    command
+        .arg("--bind")
+        .arg(address.to_string())
+        .arg("--scenario")
+        .arg(&scenario)
+        .arg("--transport")
+        .arg(&transport)
+        .arg("--digest")
+        .arg(digest)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    if scenario == "registrar" {
+        command.env("STREAMSCOPE_SIP_TEST_USERNAME", username);
+        command.env("STREAMSCOPE_SIP_TEST_PASSWORD", password);
+    }
+    if transport == "tls" {
+        command
+            .arg("--tls-cert")
+            .arg(tls_cert)
+            .arg("--tls-key")
+            .arg(tls_key);
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        command.creation_flags(0x0800_0000);
+    }
+    let mut child = command.spawn().map_err(|error| {
+        format!(
+            "无法启动独立 SIP Engine（{}）：{error}",
+            executable.display()
+        )
+    })?;
+    let stdout = child.stdout.take().ok_or("SIP Engine 没有状态输出")?;
+    let mut reader = BufReader::new(stdout);
+    let mut line = String::new();
+    if let Err(error) = reader.read_line(&mut line) {
+        let _ = child.kill();
+        let _ = child.wait();
+        return Err(format!("无法读取 SIP Engine 状态：{error}"));
+    }
+    if line.is_empty() {
+        use std::io::Read;
+        let mut reason = String::new();
+        if let Some(mut stderr) = child.stderr.take() {
+            let _ = stderr.read_to_string(&mut reason);
+        }
+        let _ = child.wait();
+        return Err(format!("SIP Engine 启动失败：{}", reason.trim()));
+    }
+    let status: serde_json::Value = match serde_json::from_str(&line) {
+        Ok(status) => status,
+        Err(_) => {
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err("SIP Engine 启动状态无效".into());
+        }
+    };
+    if status.get("event").and_then(|value| value.as_str()) != Some("listening") {
+        let _ = child.kill();
+        return Err("SIP Engine 没有进入监听状态".into());
+    }
+    let bound = match status.get("address").and_then(|value| value.as_str()) {
+        Some(bound) => bound.to_string(),
+        None => {
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err("SIP Engine 未返回监听地址".into());
+        }
+    };
+    std::thread::spawn(move || {
+        for line in reader.lines().map_while(Result::ok) {
+            if let Ok(value) = serde_json::from_str::<serde_json::Value>(&line) {
+                let _ = app.emit("sip-simulator-event", value);
+            }
+        }
+    });
+    *guard = Some((child, bound.clone()));
+    Ok(bound)
+}
+
+#[tauri::command]
+fn sip_simulator_status(state: tauri::State<'_, SipEngineState>) -> Result<Option<String>, String> {
+    let mut guard = state
+        .0
+        .lock()
+        .map_err(|_| "SIP Engine 状态锁异常".to_string())?;
+    if let Some((child, address)) = guard.as_mut() {
+        if child
+            .try_wait()
+            .map_err(|error| error.to_string())?
+            .is_none()
+        {
+            return Ok(Some(address.clone()));
+        }
+        *guard = None;
+    }
+    Ok(None)
+}
+
+#[tauri::command]
+fn stop_sip_simulator(state: tauri::State<'_, SipEngineState>) -> Result<(), String> {
+    use std::io::Write;
+    let mut guard = state
+        .0
+        .lock()
+        .map_err(|_| "SIP Engine 状态锁异常".to_string())?;
+    let Some((mut child, _)) = guard.take() else {
+        return Ok(());
+    };
+    if let Some(mut stdin) = child.stdin.take() {
+        let _ = stdin.write_all(b"stop\n");
+    }
+    let deadline = Instant::now() + Duration::from_secs(2);
+    loop {
+        if child
+            .try_wait()
+            .map_err(|error| error.to_string())?
+            .is_some()
+        {
+            return Ok(());
+        }
+        if Instant::now() >= deadline {
+            child.kill().map_err(|error| error.to_string())?;
+            let _ = child.wait();
+            return Ok(());
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
 }
 
 #[tauri::command]
@@ -253,6 +465,162 @@ async fn diagnose_onvif(request: OnvifDiagnosticOptions) -> Result<OnvifDiagnost
     })
     .await
     .map_err(|error| format!("ONVIF 诊断任务异常结束：{error}"))?
+}
+
+#[tauri::command]
+async fn diagnose_sip_pcap(path: String) -> Result<streamscope_sip::SipReport, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        streamscope_sip::analyze_pcap(std::path::Path::new(&path))
+            .map_err(|error| error.to_string())
+    })
+    .await
+    .map_err(|error| format!("SIP 抓包诊断任务异常结束：{error}"))?
+}
+
+#[tauri::command]
+async fn preview_sip_replay(
+    path: String,
+    call_id: String,
+    source: String,
+) -> Result<streamscope_sip::ReplayPlan, String> {
+    let source = source
+        .parse()
+        .map_err(|_| "抓包中的发起端地址无效".to_string())?;
+    tauri::async_runtime::spawn_blocking(move || {
+        streamscope_sip::compile_replay_plan(Path::new(&path), &call_id, source)
+    })
+    .await
+    .map_err(|error| format!("生成 SIP 场景失败：{error}"))?
+}
+
+#[tauri::command]
+async fn execute_sip_replay(
+    path: String,
+    call_id: String,
+    source: String,
+    target: String,
+    overrides: Vec<streamscope_sip::ReplayOverride>,
+) -> Result<serde_json::Value, String> {
+    let source: std::net::SocketAddr = source
+        .parse()
+        .map_err(|_| "抓包中的发起端地址无效".to_string())?;
+    let target: std::net::SocketAddr = target
+        .parse()
+        .map_err(|_| "目标设备地址必须是 IP:端口".to_string())?;
+    tauri::async_runtime::spawn_blocking(move || {
+        let executable = sip_engine_executable()?;
+        let mut command = Command::new(executable);
+        command
+            .arg("--replay-capture")
+            .arg(path)
+            .arg("--replay-call-id")
+            .arg(call_id)
+            .arg("--replay-source")
+            .arg(source.to_string())
+            .arg("--replay-target")
+            .arg(target.to_string())
+            .arg("--replay-overrides")
+            .arg(serde_json::to_string(&overrides).map_err(|error| error.to_string())?);
+        #[cfg(windows)]
+        {
+            use std::os::windows::process::CommandExt;
+            command.creation_flags(0x0800_0000);
+        }
+        let output = command
+            .output()
+            .map_err(|error| format!("启动 SIP 场景执行器失败：{error}"))?;
+        if !output.status.success() {
+            return Err(format!(
+                "SIP 场景执行失败：{}",
+                String::from_utf8_lossy(&output.stderr).trim()
+            ));
+        }
+        serde_json::from_slice(&output.stdout)
+            .map_err(|error| format!("SIP 场景结果不是有效 JSON：{error}"))
+    })
+    .await
+    .map_err(|error| format!("SIP 场景任务异常结束：{error}"))?
+}
+
+#[tauri::command]
+async fn probe_sip_target(
+    target: String,
+    transport: String,
+    server_name: String,
+    ca_cert: String,
+) -> Result<serde_json::Value, String> {
+    let address: std::net::SocketAddr = target
+        .parse()
+        .map_err(|_| "目标地址必须是 IP:端口".to_string())?;
+    if !matches!(transport.as_str(), "udp" | "tcp" | "tls") {
+        return Err("传输方式必须是 UDP、TCP 或 TLS".into());
+    }
+    if !ca_cert.is_empty() && !Path::new(&ca_cert).is_file() {
+        return Err("CA 证书文件不存在".into());
+    }
+    tauri::async_runtime::spawn_blocking(move || {
+        let executable = sip_engine_executable()?;
+        let mut command = Command::new(executable);
+        command
+            .arg("--probe")
+            .arg(address.to_string())
+            .arg("--transport")
+            .arg(transport);
+        if !server_name.is_empty() {
+            command.arg("--server-name").arg(server_name);
+        }
+        if !ca_cert.is_empty() {
+            command.arg("--ca-cert").arg(ca_cert);
+        }
+        #[cfg(windows)]
+        {
+            use std::os::windows::process::CommandExt;
+            command.creation_flags(0x0800_0000);
+        }
+        let output = command
+            .output()
+            .map_err(|error| format!("无法启动 SIP 探测引擎：{error}"))?;
+        if !output.status.success() {
+            return Err(format!(
+                "SIP 探测引擎异常退出：{}",
+                String::from_utf8_lossy(&output.stderr)
+            ));
+        }
+        serde_json::from_slice(&output.stdout).map_err(|error| format!("SIP 探测结果无效：{error}"))
+    })
+    .await
+    .map_err(|error| format!("SIP 探测任务异常结束：{error}"))?
+}
+
+#[tauri::command]
+fn export_sip_report(
+    path: String,
+    report: streamscope_sip::SipReport,
+    redacted: bool,
+) -> Result<(), String> {
+    let report = if redacted { report.redacted() } else { report };
+    let json = serde_json::to_string_pretty(&report).map_err(|error| error.to_string())?;
+    std::fs::write(&path, json).map_err(|error| format!("无法保存 SIP 诊断 JSON：{error}"))
+}
+
+#[tauri::command]
+fn export_sip_replay_result(path: String, result: serde_json::Value) -> Result<(), String> {
+    if !result
+        .get("steps")
+        .and_then(|steps| steps.as_array())
+        .is_some_and(|steps| steps.len() <= 24)
+        || result
+            .get("target")
+            .and_then(|target| target.as_str())
+            .is_none()
+    {
+        return Err("SIP 场景结果格式无效".into());
+    }
+    let json = serde_json::to_string_pretty(&result).map_err(|error| error.to_string())?;
+    if json.len() > 128 * 1024 {
+        return Err("SIP 场景结果超过导出上限".into());
+    }
+    std::fs::write(&path, json).map_err(|error| format!("无法保存 SIP 场景 JSON：{error}"))
 }
 
 #[tauri::command]
@@ -1342,6 +1710,7 @@ fn default_report_root(app: &tauri::AppHandle) -> Result<PathBuf, String> {
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
+        .manage(SipEngineState::default())
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_process::init())
         .plugin(tauri_plugin_updater::Builder::new().build())
@@ -1353,6 +1722,15 @@ pub fn run() {
             analyze_pcap_file,
             discover_onvif,
             diagnose_onvif,
+            diagnose_sip_pcap,
+            preview_sip_replay,
+            execute_sip_replay,
+            probe_sip_target,
+            export_sip_report,
+            export_sip_replay_result,
+            start_sip_simulator,
+            stop_sip_simulator,
+            sip_simulator_status,
             compare_rtsp,
             cancel_analysis,
             export_media,

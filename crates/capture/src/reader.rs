@@ -4,7 +4,7 @@ use std::io::Read;
 const MAX_BLOCK_BYTES: usize = 16 * 1024 * 1024;
 
 #[derive(Clone, Debug)]
-pub(crate) struct FrameMeta {
+pub struct FrameMeta {
     pub number: u64,
     pub timestamp_micros: u64,
     pub interface: String,
