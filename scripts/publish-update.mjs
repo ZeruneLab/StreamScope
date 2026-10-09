@@ -69,4 +69,5 @@ if (JSON.stringify(expectedAssets) !== JSON.stringify(actualAssets)) {
 }
 
 github(["release", "edit", tag, "--repo", repository, "--draft=false", "--latest"]);
-console.log(JSON.stringify({ tag, url: releaseInfo.url, assets: actualAssets, sha256: hash }, null, 2));
+const published = JSON.parse(github(["release", "view", tag, "--repo", repository, "--json", "url"]).stdout);
+console.log(JSON.stringify({ tag, url: published.url, assets: actualAssets, sha256: hash }, null, 2));

@@ -1,6 +1,6 @@
 # 核心宿主独立构建
 
-当前版本已准备为 v0.2.0 正式核心交付，公开插件目录、长期签名和主程序更新构建由 `scripts/prepare-plugin-release.mjs` 提供。下文 0.1.10 包、摘要及未发布事项为历史预览记录，最新发布范围见 `docs/release-v0.2.0.md` 和 `docs/plugin-catalog.md`。
+当前版本已正式发布为 v0.2.0 核心交付，公开插件目录、长期签名和主程序更新构建由 `scripts/prepare-plugin-release.mjs` 提供。下文 0.1.10 包、摘要及未发布事项为历史预览记录，最新发布范围见 `docs/release-v0.2.0.md` 和 `docs/plugin-catalog.md`。
 
 核心宿主预览版已经可以独立构建及打包。仓库版本仍为 `0.1.10`；此包用于插件迁移验收，不作为正式 `v0.2.0` 发布，也不会自动安装或覆盖本机软件。
 

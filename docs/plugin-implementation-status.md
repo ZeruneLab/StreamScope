@@ -42,6 +42,6 @@
 可在本机设置 `STREAMSCOPE_LOCAL_PCAP` 为已有多流抓包路径，再运行 `cargo test -p streamscope-plugin-media --test protocol optional_local_multistream_pcap_matches_existing_analyzer` 复测扫描与指定流的等价性；不设置变量时该可选测试不读取用户文件。
 
 核心预览构建使用 `node scripts/core-host.mjs package`，输出到 `target/core-host/release/bundle/nsis`；`node scripts/verify-core-host.mjs` 自动解包核对应用负载、WebView2Loader 摘要及核心依赖边界。前端原工作台动作名称保留为适配器输入，不是核心 Rust 静态分析命令。安装包尚未作主程序更新签名；正式插件目录仍未配置，不自动替换本机软件。
-# v0.2.0 发布准备（2026-10-09）
+# v0.2.0 发布记录（2026-10-09）
 
-核心与八个功能插件版本已递增至 0.2.0，FFmpeg 共享包 7.1.1、示例 1.0.0 独立维护。正式签名身份和独立公开插件仓库已建立，本批核心签名安装包、目录和十个 release 插件包已构建；隔离安装（74.28 秒）、九路抓包联动（54.60 秒）、宿主/媒体/SIP 与完整工作台 UI 回归通过。发布与线上匿名下载验收使用独立脚本，不能把本地构建通过当作已经完成线上发布。详情见 `release-v0.2.0.md` 和 `plugin-catalog.md`。下文未发布/临时密钥/0.1.10 主程序描述为各轮历史状态。
+核心与八个功能插件版本已递增至 0.2.0，FFmpeg 共享包 7.1.1、示例 1.0.0 独立维护。正式签名身份和独立公开插件仓库已建立，核心安装包已发布到主程序 v0.2.0 Release，十个签名插件已发布到独立插件仓库 `plugins-2026.10.09.1`，签名目录已上线。隔离安装（74.28 秒）、九路抓包联动（54.60 秒）、宿主/媒体/SIP 与完整工作台 UI 回归通过。线上目录验签、十个包完整匿名下载及摘要、主程序匿名更新清单与安装包 Ed25519 签名验证通过。由于本机 github.com 下载域名超时，匿名下载验收使用 GitHub 公共资产 API，不将它描述为本机应用内更新完整流程通过。详情见 `release-v0.2.0.md` 和 `plugin-catalog.md`。下文未发布/临时密钥/0.1.10 主程序描述为各轮历史状态。

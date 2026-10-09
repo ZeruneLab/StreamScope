@@ -45,4 +45,5 @@ if (JSON.stringify(release.assets.map(item => item.name).sort()) !== JSON.string
   throw new Error("上传资产不完整，保持草稿，不发布目录");
 }
 gh(["release", "edit", tag, "--repo", repository, "--draft=false"]);
-console.log(`已发布 ${assets.length} 个签名插件：${release.url}；现在可以原子提交签名目录。`);
+const published = JSON.parse(gh(["release", "view", tag, "--repo", repository, "--json", "url"]).stdout);
+console.log(`已发布 ${assets.length} 个签名插件：${published.url}；现在可以原子提交签名目录。`);

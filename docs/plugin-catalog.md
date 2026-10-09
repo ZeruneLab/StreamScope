@@ -14,6 +14,8 @@
 
 ## 通用规则与预览阶段记录
 
+以下提到“未配置”“尚未发布”的内容来自预览阶段，正式发布状态以上方 v0.2.0 节和本次验收记录为准。
+
 目录采用独立 HTTPS 地址，不使用主程序 GitHub `releases/latest`；`catalog.json` 的同目录 `catalog.json.sig` 是对 JSON 原始字节的 Ed25519 签名 Base64。每个条目绑定 `.ssp` 下载 URL、完整包 SHA-256、发布者公钥指纹、版本、平台与 Host API。宿主先验目录签名，再下载并复核包 SHA-256、包签名和条目身份，最后展示原生代码风险供用户确认。
 
 同一 ID/版本可以发布不同平台的包；ID/版本/系统/架构完全相同的重复条目拒绝。签名目录允许未来 Host API 版本，当前宿主仅显示兼容的平台/API 条目。缺失依赖按 SemVer 范围选最高兼容版本，满足范围的已安装包优先复用；多层依赖预检后统一确认，按依赖顺序安装。循环和已选版本冲突会在写注册表前报错。单包失败回滚不会卸载先前已成功安装的依赖，管理页会刷新实际状态。
@@ -25,3 +27,14 @@
 Windows x64 官方包可由 `node scripts/build-official-plugins.mjs` 一次生成。运行前分别设置 `STREAMSCOPE_PLUGIN_PUBLISHER_KEY_FILE`（插件发布者 Ed25519 seed 文件）、`STREAMSCOPE_PLUGIN_CATALOG_KEY_FILE`（目录签名 seed 文件）和 `STREAMSCOPE_PLUGIN_BASE_URL`（未来上传 `.ssp` 的 HTTPS 目录）。默认编译 release 二进制并输出到 `dist/official-plugins`；`STREAMSCOPE_PLUGIN_OUTPUT_DIR` 可指定输出目录。两个密钥文件都不得提交或打进安装包。脚本还输出 `catalog.pub`，构建宿主时将其内容设为 `STREAMSCOPE_PLUGIN_CATALOG_PUBLIC_KEY`，并将目录地址 `.../catalog.json` 设为 `STREAMSCOPE_PLUGIN_CATALOG_URL`。先在离线测试环境验证，正式发布前再次确认目录公钥与宿主内置值一致。
 
 离线回归：先编译 debug 插件及 `plugin-pack`/`catalog-sign`/`streams-sip-engine`，再运行 `node scripts/verify-official-plugins.mjs`。脚本使用随机临时密钥，生成十个真实包、验证目录签名和包摘要，再将全部包安装到隔离的临时注册表，执行 H.264/H.265 语法动作及共享运行时 MP3 导出。无论成功或失败，最终清理本次新建的临时目录；不操作当前用户的已安装插件，不作为正式发布。测试同时验证目录的 `sha256:` 摘要与预览纯十六进制摘要之间的规范化确认绑定。
+
+## 2026-10-09 线上验收
+
+- 主程序源码提交：`d9a0e87abff2074e8bce929e0770a714a5f1090e`，提交人与提交者均为 ZeruneLab，中文提交记录说明插件化与联合功能恢复。
+- 主程序 Release：`https://github.com/ZeruneLab/StreamScope/releases/tag/v0.2.0`，已设为最新版本，包含安装器、`.sig`、`latest.json` 和 `SHA256SUMS.txt`。
+- 插件 Release：`https://github.com/ZeruneLab/StreamScope-Plugins/releases/tag/plugins-2026.10.09.1`，包含十个 `.ssp`，不与主程序最新 Release 混用。
+- 签名目录提交：`327f089`，目录与签名在单次提交上线，固定公钥与主程序内置配置一致。
+- 安装器 SHA-256：`950dd1de056f9f198e1adee512a145a701febc109582c4d6e79e20813a99fd5d`，大小 6,781,403 字节；核心负载只有主程序与 WebView2Loader。
+- `node scripts/verify-published-plugins.mjs --app --api-assets --curl` 通过：不携带 GitHub Token、账号 Cookie 或 Authorization，完整下载十个包（含 173,782,636 字节运行时包）校验 SHA-256；验证公开目录 Ed25519 签名，核对公开主程序更新清单、安装包 SHA-256 和 Tauri Ed25519 更新签名。
+- 本机 Node fetch 曾出现连接重置，普通 github.com 下载路径也曾连接超时；curl 与 GitHub 公共资产 API 验收可达。不把 API 路径通过宣称为所有网络中的应用内更新端到端通过；软件下载仍要求 GitHub 下载域名可达。脚本 `--api-assets` 只用于验收，不静默改变主程序下载地址。
+- 本轮只发布，没有替换用户当前已安装的主程序、插件或报告。长期签名私钥保存在发布机用户 `.tauri` 目录，未上传任何仓库或资产，需离线备份。
