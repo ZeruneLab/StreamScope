@@ -1,11 +1,16 @@
 import { FormEvent, useEffect, useMemo, useRef, useState } from "react";
-import { convertFileSrc, invoke } from "@tauri-apps/api/core";
+import { convertFileSrc } from "@tauri-apps/api/core";
+import { invoke } from "./application-api";
 import { listen } from "@tauri-apps/api/event";
 import { open, save } from "@tauri-apps/plugin-dialog";
 import { CaptureStreams } from "./CaptureStreams";
 import OnvifDiagnostics from "./OnvifDiagnostics";
 import SipDiagnostics from "./SipDiagnostics";
+import { PluginManager } from "./PluginManager";
+import type { Installed } from "./PluginManager";
+import { PluginView, type PreparedContinuation } from "./PluginView";
 import { UpdateControl } from "./UpdateControl";
+import { ReportHistory } from "./ReportHistory";
 import type {
   AnalysisProgress,
   AnalysisRun,
@@ -22,7 +27,7 @@ import type {
 } from "./types";
 
 type View = "overview" | "playback" | "audioQuality" | "protocol" | "stream" | "videoDeep" | "diagnostics" | "timeline" | "report" | "log";
-type InputMode = "rtsp" | "h264" | "h265" | "audio" | "pcap" | "onvif" | "sip";
+type InputMode = "rtsp" | "h264" | "h265" | "audio" | "pcap" | "onvif" | "sip" | "plugins" | "plugin" | "history";
 type TransportMode = "tcp" | "udp" | "compare";
 type AudioExportFormat = "wav" | "mp3" | "m4a" | "flac" | "ogg";
 
@@ -67,9 +72,13 @@ function formatDuration(value: number | null | undefined): string {
   return value >= 1_000 ? `${(value / 1_000).toFixed(2)} s` : `${value} ms`;
 }
 
-function App() {
+function App({ coreOnly = false }: { coreOnly?: boolean }) {
   const [url, setUrl] = useState("");
-  const [inputMode, setInputMode] = useState<InputMode>("rtsp");
+  const [inputMode, setInputMode] = useState<InputMode>(coreOnly ? "plugins" : "rtsp");
+  const [installedPlugins, setInstalledPlugins] = useState<Installed[]>([]);
+  const [selectedContribution, setSelectedContribution] = useState<string | null>(null);
+  const [visitedContributions, setVisitedContributions] = useState<string[]>([]);
+  const [continuation, setContinuation] = useState<PreparedContinuation | null>(null);
   const [offlinePath, setOfflinePath] = useState("");
   const [transport, setTransport] = useState<TransportMode>("tcp");
   const [duration, setDuration] = useState(10);
@@ -96,9 +105,44 @@ function App() {
 
   useEffect(() => {
     invoke<RecentRun[]>("list_analysis_history").then(setHistory).catch(() => undefined);
+    invoke<Installed[]>("list_plugins").then(setInstalledPlugins).catch(() => undefined);
     const unlisten = listen<AnalysisProgress>("analysis-progress", (event) => setProgress(event.payload));
-    return () => { void unlisten.then((dispose) => dispose()); };
+    const pluginProgress = (event: Event) => setProgress((event as CustomEvent<AnalysisProgress>).detail);
+    window.addEventListener("workbench-progress", pluginProgress);
+    return () => { void unlisten.then((dispose) => dispose()); window.removeEventListener("workbench-progress", pluginProgress); };
   }, []);
+
+  const pluginSelection = installedPlugins.flatMap((plugin) => plugin.enabled
+    ? plugin.manifest.contributions.map((contribution) => ({ plugin, contribution })) : [])
+    .find(({ contribution }) => contribution.id === selectedContribution);
+
+  useEffect(() => {
+    if (selectedContribution) setVisitedContributions((current) => current.includes(selectedContribution) ? current : [...current, selectedContribution]);
+  }, [selectedContribution]);
+
+  function refreshPlugins() {
+    void invoke<Installed[]>("list_plugins").then(setInstalledPlugins).catch(() => undefined);
+  }
+
+  const available = (id: string) => !coreOnly || installedPlugins.some((plugin) => plugin.enabled && plugin.manifest.id === `org.streamscope.${id}`);
+
+  async function openFullAnalysis(reportDirectory: string) {
+    try {
+      const loaded = await invoke<AnalysisRun>("load_analysis_run", { reportDirectory });
+      setRun(loaded); setSelectedStreamId(null); setComparison(null); setReportHtml("");
+      const kind = loaded.result.request.source_kind;
+      setInputMode(kind === "h264" || kind === "h265" || kind === "audio" || kind === "pcap" ? kind : "rtsp");
+      setView("overview"); setError("");
+    } catch (reason) { setError(String(reason)); }
+  }
+
+  async function continuePlugin(reportId: string, actionId: string) {
+    try {
+      const prepared = await invoke<Omit<PreparedContinuation, "nonce" | "sourcePage">>("prepare_plugin_continuation", { reference: { reportId, actionId } });
+      setContinuation({ ...prepared, nonce: crypto.randomUUID(), sourcePage: inputMode === "plugin" && pluginSelection ? `${pluginSelection.plugin.manifest.id}:${pluginSelection.contribution.id}` : "plugins" });
+      setSelectedContribution(prepared.contributionId); setInputMode("plugin"); setError("");
+    } catch (reason) { setError(String(reason)); }
+  }
 
   const health = useMemo(() => {
     if (!run) return { label: "等待分析", className: "neutral" };
@@ -445,7 +489,7 @@ function App() {
   }
 
   return (
-    <div className="app-shell">
+    <div className={`app-shell ${coreOnly ? "core-workbench" : ""}`}>
       <aside className="sidebar">
         <div className="brand">
           <span className="brand-mark" aria-hidden="true">
@@ -459,28 +503,36 @@ function App() {
           </div>
         </div>
 
-        <nav aria-label="主导航">
-          <button className={`nav-item ${inputMode === "rtsp" ? "active" : ""}`} type="button" onClick={() => { setInputMode("rtsp"); setOfflinePath(""); }}>
+        <nav aria-label="主导航" inert={coreOnly && running}>
+          {available("rtsp") && <button className={`nav-item ${inputMode === "rtsp" ? "active" : ""}`} type="button" onClick={() => { setInputMode("rtsp"); setOfflinePath(""); }}>
             <span className="nav-icon">⌁</span>实时分析
-          </button>
-          <button className={`nav-item ${inputMode === "h264" ? "active" : ""}`} type="button" onClick={() => { setInputMode("h264"); setOfflinePath(""); }}>
+          </button>}
+          {available("h264") && <button className={`nav-item ${inputMode === "h264" ? "active" : ""}`} type="button" onClick={() => { setInputMode("h264"); setOfflinePath(""); }}>
             <span className="nav-icon">◇</span>H.264 文件
-          </button>
-          <button className={`nav-item ${inputMode === "h265" ? "active" : ""}`} type="button" onClick={() => { setInputMode("h265"); setOfflinePath(""); }}>
+          </button>}
+          {available("h265") && <button className={`nav-item ${inputMode === "h265" ? "active" : ""}`} type="button" onClick={() => { setInputMode("h265"); setOfflinePath(""); }}>
             <span className="nav-icon">◇</span>H.265 / HEVC
-          </button>
-          <button className={`nav-item ${inputMode === "audio" ? "active" : ""}`} type="button" onClick={() => { setInputMode("audio"); setOfflinePath(""); }}>
+          </button>}
+          {available("audio") && <button className={`nav-item ${inputMode === "audio" ? "active" : ""}`} type="button" onClick={() => { setInputMode("audio"); setOfflinePath(""); }}>
             <span className="nav-icon">♫</span>音频文件
-          </button>
-          <button className={`nav-item ${inputMode === "pcap" ? "active" : ""}`} type="button" onClick={() => { setInputMode("pcap"); setOfflinePath(""); }}>
+          </button>}
+          {available("pcap") && <button className={`nav-item ${inputMode === "pcap" ? "active" : ""}`} type="button" onClick={() => { setInputMode("pcap"); setOfflinePath(""); }}>
             <span className="nav-icon">◫</span>PCAP / PCAPNG
-          </button>
-          <button className={`nav-item ${inputMode === "onvif" ? "active" : ""}`} type="button" onClick={() => { setInputMode("onvif"); setOfflinePath(""); }}>
+          </button>}
+          {available("onvif") && <button className={`nav-item ${inputMode === "onvif" ? "active" : ""}`} type="button" onClick={() => { setInputMode("onvif"); setOfflinePath(""); }}>
             <span className="nav-icon">◎</span>ONVIF 诊断
-          </button>
-          <button className={`nav-item ${inputMode === "sip" ? "active" : ""}`} type="button" onClick={() => { setInputMode("sip"); setOfflinePath(""); }}>
+          </button>}
+          {available("sip") && <button className={`nav-item ${inputMode === "sip" ? "active" : ""}`} type="button" onClick={() => { setInputMode("sip"); setOfflinePath(""); }}>
             <span className="nav-icon">◉</span>SIP 诊断
+          </button>}
+          <button className={`nav-item ${inputMode === "plugins" ? "active" : ""}`} type="button" onClick={() => setInputMode("plugins")}>
+            <span className="nav-icon">▣</span>插件管理
           </button>
+          <button className={`nav-item ${inputMode === "history" ? "active" : ""}`} type="button" onClick={() => setInputMode("history")}><span className="nav-icon">◷</span>历史报告</button>
+          {installedPlugins.filter((plugin) => plugin.enabled).flatMap((plugin) => plugin.manifest.contributions.filter((contribution) => contribution.kind !== "internal" && (!coreOnly || !["analyze", "diagnose"].includes(contribution.action) || !["rtsp", "h264", "h265", "audio", "pcap", "onvif", "sip"].some((id) => plugin.manifest.id === `org.streamscope.${id}`))).map((contribution) =>
+            <button key={contribution.id} title={contribution.title} className={`nav-item ${inputMode === "plugin" && selectedContribution === contribution.id ? "active" : ""}`} type="button" onClick={() => { setSelectedContribution(contribution.id); setInputMode("plugin"); }}>
+              <span className="nav-icon">▧</span>{contribution.title.replace(/\s*[（(]插件[）)]\s*$/, "")}
+            </button>))}
         </nav>
 
         <div className="history">
@@ -504,15 +556,15 @@ function App() {
           )}
         </div>
 
-        <UpdateControl analysisRunning={running} />
+        <UpdateControl coreOnly={coreOnly} analysisRunning={running} />
       </aside>
 
       <main>
         <header className="topbar">
           <div>
-            <p className="eyebrow">{inputMode === "onvif" ? "ONVIF DEVICE INSPECTOR" : inputMode === "sip" ? "SIP SIGNALING INSPECTOR" : "RTSP INSPECTOR"}</p>
-            <h1>{inputMode === "onvif" ? "ONVIF 设备诊断" : inputMode === "sip" ? "SIP 信令诊断" : inputMode === "pcap" ? "多流抓包诊断" : inputMode === "h264" ? "H.264 文件诊断" : inputMode === "h265" ? "H.265 文件诊断" : inputMode === "audio" ? "音频文件诊断" : "实时流诊断"}</h1>
-            <p>{inputMode === "onvif" ? "按标准服务链验证设备能力，并把媒体入口交给现有 RTSP/RTP 分析器。" : inputMode === "sip" ? "从抓包还原 SIP 事务、呼叫、SDP 和 RTP 关联证据。" : inputMode === "pcap" ? "发现抓包中的媒体流，独立查看每路的网络与码流证据。" : "验证媒体参数与实际解码结果。"}</p>
+            <p className="eyebrow">{inputMode === "plugin" || inputMode === "plugins" ? "PLUGIN HOST" : inputMode === "onvif" ? "ONVIF DEVICE INSPECTOR" : inputMode === "sip" ? "SIP SIGNALING INSPECTOR" : "RTSP INSPECTOR"}</p>
+            <h1>{inputMode === "history" ? "历史报告" : inputMode === "plugin" ? pluginSelection?.contribution.title ?? "插件入口" : inputMode === "plugins" ? "插件管理" : inputMode === "onvif" ? "ONVIF 设备诊断" : inputMode === "sip" ? "SIP 信令诊断" : inputMode === "pcap" ? "多流抓包诊断" : inputMode === "h264" ? "H.264 文件诊断" : inputMode === "h265" ? "H.265 文件诊断" : inputMode === "audio" ? "音频文件诊断" : "实时流诊断"}</h1>
+            <p>{inputMode === "plugin" ? "由已安装插件提供功能，界面由宿主渲染。" : inputMode === "plugins" ? "导入并管理已签名的业务插件。" : inputMode === "onvif" ? "按标准服务链验证设备能力，并把媒体入口交给现有 RTSP/RTP 分析器。" : inputMode === "sip" ? "从抓包还原 SIP 事务、呼叫、SDP 和 RTP 关联证据。" : inputMode === "pcap" ? "发现抓包中的媒体流，独立查看每路的网络与码流证据。" : "验证媒体参数与实际解码结果。"}</p>
           </div>
           <div className={`health-pill ${health.className}`}>
             <span />{health.label}
@@ -521,8 +573,22 @@ function App() {
 
         <section className="workspace">
           {inputMode === "onvif" && <OnvifDiagnostics onAnalyzeRtsp={(streamUri) => { setUrl(streamUri); setInputMode("rtsp"); setRun(null); setError(""); }} />}
-          {inputMode === "sip" && <SipDiagnostics onAnalyzeMedia={(path) => { setOfflinePath(path); setInputMode("pcap"); setRun(null); setError(""); }} />}
-          <form className={`analysis-form panel ${inputMode === "onvif" || inputMode === "sip" ? "mode-hidden" : ""}`} onSubmit={submit}>
+          {inputMode === "sip" && <SipDiagnostics coreOnly={coreOnly} onAnalyzeMedia={(path) => { setOfflinePath(path); setInputMode("pcap"); setRun(null); setError(""); }} />}
+          {inputMode === "plugins" && <PluginManager coreOnly={coreOnly} onChanged={refreshPlugins} onOpenAnalysis={(directory) => { void openFullAnalysis(directory); }} onContinue={(reportId, actionId) => { void continuePlugin(reportId, actionId); }} />}
+          {inputMode === "history" && <ReportHistory onOpenAnalysis={(directory) => { void openFullAnalysis(directory); }} />}
+          {installedPlugins.filter((plugin) => plugin.enabled).flatMap((plugin) => plugin.manifest.contributions.filter((entry) => visitedContributions.includes(entry.id)).map((contribution) => {
+            const active = inputMode === "plugin" && selectedContribution === contribution.id;
+            return <div className="plugin-page" key={`${plugin.manifest.id}:${contribution.id}`} hidden={!active}>
+              <PluginView plugin={plugin} contribution={contribution} active={active}
+                onRunningChange={setRunning} continuation={continuation?.contributionId === contribution.id ? continuation : null}
+                onReturnToSource={(page) => {
+                  const source = installedPlugins.flatMap((plugin) => plugin.manifest.contributions.map((entry) => ({ page: `${plugin.manifest.id}:${entry.id}`, id: entry.id }))).find((entry) => entry.page === page);
+                  if (source) { setSelectedContribution(source.id); setInputMode("plugin"); } else setInputMode("plugins");
+                }} onContinue={(reportId, actionId) => { void continuePlugin(reportId, actionId); }}
+                onOpenAnalysis={(directory) => { void openFullAnalysis(directory); }} />
+            </div>;
+          }))}
+          <form className={`analysis-form panel ${["onvif", "sip", "plugins", "plugin", "history"].includes(inputMode) ? "mode-hidden" : ""}`} onSubmit={submit}>
             <div className="panel-heading">
               <div>
                 <span className="step">01</span>
@@ -626,7 +692,7 @@ function App() {
 
           {inputMode !== "onvif" && inputMode !== "sip" && error && <div className="error-banner"><strong>无法开始分析</strong>{error}</div>}
 
-          <section className={`results panel ${run ? "has-result" : ""} ${inputMode === "onvif" || inputMode === "sip" ? "mode-hidden" : ""}`}>
+          <section className={`results panel ${run ? "has-result" : ""} ${["onvif", "sip", "plugins", "plugin", "history"].includes(inputMode) ? "mode-hidden" : ""}`}>
             <div className="panel-heading results-heading">
               <div>
                 <span className="step">02</span>

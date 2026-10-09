@@ -1,0 +1,22 @@
+{
+  "schemaVersion": 1,
+  "kind": "runtime",
+  "id": "org.streamscope.ffmpeg",
+  "name": "FFmpeg 共享运行时",
+  "version": "7.1.1",
+  "publisher": {
+    "id": "org.streamscope",
+    "keyFingerprint": "sha256:0000000000000000000000000000000000000000000000000000000000000000"
+  },
+  "hostApi": "^1.0",
+  "platforms": [
+    { "os": "windows", "arch": "x86_64", "entry": "bin/ffmpeg.exe" }
+  ],
+  "contributions": [],
+  "ui": { "kind": "declarative", "file": "ui.json" },
+  "permissions": [],
+  "dependencies": [],
+  "files": {},
+  "license": "GPL-3.0-or-later",
+  "description": "供媒体分析插件共用的 ffmpeg.exe、ffprobe.exe，以及视频深度分析所需的 video-worker.exe 和 FFmpeg 动态库。"
+}

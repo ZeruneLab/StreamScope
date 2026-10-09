@@ -1,0 +1,18 @@
+{
+  "schemaVersion": 1,
+  "id": "org.streamscope.h265",
+  "name": "H.265 文件诊断",
+  "version": "0.2.0",
+  "publisher": { "id": "org.streamscope", "keyFingerprint": "sha256:0000000000000000000000000000000000000000000000000000000000000000" },
+  "hostApi": "^1.1",
+  "platforms": [{ "os": "windows", "arch": "x86_64", "entry": "bin/streamscope-plugin-h265.exe" }],
+  "contributions": [
+    { "id": "org.streamscope.h265.analyze", "title": "H.265 文件诊断（插件）", "kind": "analysis", "action": "analyze", "inputTypes": ["h265"], "view": "main" },
+    { "id": "org.streamscope.h265.syntax", "title": "H.265 NALU 语法 / HEX", "kind": "analysis", "action": "inspect-nalus", "inputTypes": ["h265"], "view": "syntax" }
+  ],
+  "ui": { "kind": "declarative", "file": "ui.json" },
+  "permissions": [{ "name": "file-read", "scope": ["user-selected-file"] }, { "name": "report-write", "scope": ["host-report-root"] }],
+  "dependencies": [{ "id": "org.streamscope.ffmpeg", "version": "^7.1" }],
+  "files": {},
+  "description": "调用现有 H.265 分析器的独立进程迁移验证版；报告由原查看器打开。"
+}

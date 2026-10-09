@@ -1,0 +1,17 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "build": {
+    "beforeDevCommand": "npm run dev:core",
+    "beforeBuildCommand": "npm run build:core",
+    "frontendDist": "../dist-core"
+  },
+  "bundle": {
+    "createUpdaterArtifacts": false,
+    "externalBin": [],
+    "resources": [],
+    "shortDescription": "StreamScope 核心宿主与插件管理",
+    "windows": {
+      "nsis": { "installerHooks": "./windows/installer-hooks-core.nsh" }
+    }
+  }
+}

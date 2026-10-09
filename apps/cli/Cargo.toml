@@ -10,7 +10,12 @@ path = "src/main.rs"
 
 [dependencies]
 clap.workspace = true
-streamscope-analyzer = { path = "../../crates/analyzer" }
-streamscope-core = { path = "../../crates/core" }
-streamscope-sip = { path = "../../crates/sip" }
+streamscope-analyzer = { path = "../../crates/analyzer", optional = true }
+streamscope-core = { path = "../../crates/core", optional = true }
+streamscope-sip = { path = "../../crates/sip", optional = true }
+streamscope-plugin-host = { path = "../../crates/plugin-host" }
 serde_json.workspace = true
+
+[features]
+default = ["compat"]
+compat = ["dep:streamscope-analyzer", "dep:streamscope-core", "dep:streamscope-sip"]

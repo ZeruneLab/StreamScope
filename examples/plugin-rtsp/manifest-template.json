@@ -1,0 +1,15 @@
+{
+  "schemaVersion": 1,
+  "id": "org.streamscope.rtsp",
+  "name": "RTSP 实时诊断",
+  "version": "0.2.0",
+  "publisher": { "id": "org.streamscope", "keyFingerprint": "sha256:0000000000000000000000000000000000000000000000000000000000000000" },
+  "hostApi": "^1.1",
+  "platforms": [{ "os": "windows", "arch": "x86_64", "entry": "bin/streamscope-plugin-rtsp.exe" }],
+  "contributions": [{ "id": "org.streamscope.rtsp.analyze", "title": "RTSP 实时诊断（插件）", "kind": "analysis", "action": "analyze", "inputTypes": ["rtsp-url"], "view": "main" }],
+  "ui": { "kind": "declarative", "file": "ui.json" },
+  "permissions": [{ "name": "network", "scope": ["user-selected-rtsp-endpoint"] }, { "name": "report-write", "scope": ["host-report-root"] }],
+  "dependencies": [{ "id": "org.streamscope.ffmpeg", "version": "^7.1" }],
+  "files": {},
+  "description": "调用现有 RTSP/RTP 跨层分析器的独立进程迁移验证版。"
+}

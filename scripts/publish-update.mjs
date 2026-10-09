@@ -62,7 +62,7 @@ const release = github([
   "--json", "assets,url,isDraft",
 ]);
 const releaseInfo = JSON.parse(release.stdout);
-const expectedAssets = [installer, signature, manifestPath, checksums].map(basename).sort();
+const expectedAssets = [installer, signature, manifestPath, checksums].map(path => basename(path)).sort();
 const actualAssets = releaseInfo.assets.map((asset) => asset.name).sort();
 if (JSON.stringify(expectedAssets) !== JSON.stringify(actualAssets)) {
   throw new Error(`Release 资产不完整：期望 ${expectedAssets.join(", ")}，实际 ${actualAssets.join(", ")}`);

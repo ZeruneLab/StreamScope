@@ -4,6 +4,8 @@ StreamScope 是面向摄像头、NVR 和嵌入式音视频设备开发者的 RTS
 
 ## 当前能力
 
+v0.2.0 起采用核心宿主 + 按需插件，保留原完整联合分析工作台。首次安装请进入“插件管理”安装所需功能；官方目录及离线包在 [StreamScope-Plugins](https://github.com/ZeruneLab/StreamScope-Plugins)。主程序与插件分别更新，插件卸载不删除报告。变更及预览版迁移须知见 [v0.2.0 更新说明](docs/release-v0.2.0.md)。
+
 - 校验 `rtsp://` / `rtsps://` 地址，并在所有输出中隐藏密码。
 - 检查本机 `ffmpeg` 和 `ffprobe` 是否可用。
 - 支持 RTSP over TCP 或 UDP 的流信息探测。
@@ -49,7 +51,7 @@ StreamScope 是面向摄像头、NVR 和嵌入式音视频设备开发者的 RTS
 
 - Windows 10/11 64 位系统。
 - Microsoft Edge WebView2 Runtime。安装程序会在系统缺少它时联网下载安装；StreamScope 0.1.1 起同时随安装包部署匹配架构的 `WebView2Loader.dll`。
-- StreamScope 0.1.2 安装包内置 `ffmpeg.exe` 和 `ffprobe.exe`，优先使用程序目录中的版本，用户无需单独安装或配置 `PATH`。软件不依赖 `ffplay`。
+- StreamScope 0.1.2～0.1.10 完整安装包内置 FFmpeg。v0.2.0 核心安装包不带 FFmpeg，媒体插件通过官方目录按需安装共享运行时；用户均无需单独安装或配置 `PATH`。软件不依赖 `ffplay`。
 - 对报告目录（默认 `文档/StreamScope/reports/`）具有写入权限。实时 RTSP 分析还需要目标设备网络可达；使用 UDP 时，网络和防火墙需允许对应 UDP 媒体流量。
 
 安装版运行不需要 PowerShell、Python、Rust、Cargo、Node.js 或 npm。详细检查和故障处理见 [`docs/runtime-requirements.md`](docs/runtime-requirements.md)。
@@ -73,6 +75,8 @@ npm --version
 ```
 
 ## 构建与运行
+
+v0.2.0 正式交付使用核心构建：`node scripts/core-host.mjs package`。长期签名包与内置官方目录的构建流程见 [插件目录发布文档](docs/plugin-catalog.md)，不应使用下文兼容版默认构建作为 v0.2.0 发布包。兼容版仍保留供历史回归使用。
 
 ### 直接使用桌面版
 

@@ -1,0 +1,16 @@
+{
+  "schemaVersion": 1,
+  "generatedAt": "2026-09-29T00:00:00Z",
+  "packages": [
+    {
+      "id": "org.streamscope.onvif",
+      "version": "0.1.10",
+      "packageUrl": "https://example.invalid/plugins/onvif-0.1.10-win-x64.ssp",
+      "packageSha256": "sha256:0000000000000000000000000000000000000000000000000000000000000000",
+      "publisherFingerprint": "sha256:0000000000000000000000000000000000000000000000000000000000000000",
+      "hostApi": "^1.0",
+      "os": "windows",
+      "arch": "x86_64"
+    }
+  ]
+}

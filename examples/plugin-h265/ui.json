@@ -1,0 +1,13 @@
+{
+  "schemaVersion": 1,
+  "views": [{ "id": "main", "title": "H.265 文件诊断", "components": [
+    { "type": "input", "id": "path", "label": "H.265 Annex B 文件", "inputType": "file", "required": true },
+    { "type": "output", "title": "分析任务" }
+  ] }, { "id": "syntax", "title": "H.265 NALU 语法 / HEX", "components": [
+    { "type": "text", "text": "输入 Annex B 裸码流及 NALU 序号范围（从 1 开始，最多 50 个，总计最多 8 MiB）。仅显示现有解析器已确认的语法字段。" },
+    { "type": "input", "id": "path", "label": "H.265 Annex B 文件", "inputType": "file", "required": true },
+    { "type": "input", "id": "firstNalu", "label": "首个 NALU 序号（默认 1）", "inputType": "number", "required": false },
+    { "type": "input", "id": "lastNalu", "label": "末个 NALU 序号（默认同首个）", "inputType": "number", "required": false },
+    { "type": "output", "title": "语法与字节证据" }
+  ] }]
+}

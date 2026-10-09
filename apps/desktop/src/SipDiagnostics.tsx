@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from "react";
-import { invoke } from "@tauri-apps/api/core";
+import { invoke } from "./application-api";
 import { listen } from "@tauri-apps/api/event";
 import { open, save } from "@tauri-apps/plugin-dialog";
 import "./SipDiagnostics.css";
@@ -16,7 +16,7 @@ interface SipProbeResult { target: string; transport: string; status: number | n
 interface SipReplayPlan { call_id: string; capture_source: string; capture_target: string; executable: boolean; warnings: string[]; steps: { packet_number: number; delay_ms: number; method: string; local_user: string; remote_user: string; expected_status: number | null; inactive_media: { kind: string; encoding: string } | null }[]; }
 interface SipReplayResult { target: string; local: string; success: boolean; error: string | null; steps: { capture_packet: number; method: string; expected_status: number | null; actual_status: number | null; latency_ms: number; outcome: string }[]; }
 
-export default function SipDiagnostics({ onAnalyzeMedia }: { onAnalyzeMedia: (path: string) => void }) {
+export default function SipDiagnostics({ onAnalyzeMedia, coreOnly = false }: { onAnalyzeMedia: (path: string) => void; coreOnly?: boolean }) {
   const [path, setPath] = useState("");
   const [report, setReport] = useState<SipReport | null>(null);
   const [busy, setBusy] = useState(false);
@@ -170,7 +170,7 @@ export default function SipDiagnostics({ onAnalyzeMedia }: { onAnalyzeMedia: (pa
       {probeResult && <p className="sip-running">{probeResult.transport} {probeResult.target}：{probeResult.error ? `未确认 SIP 服务（${probeResult.error}）` : `SIP ${probeResult.status} · ${probeResult.latency_ms} ms`}</p>}
       {probeError && <div className="error-banner">探测失败：{probeError}</div>}
     </section>
-    <section className="panel sip-input">
+    {!coreOnly && <section className="panel sip-input">
       <div className="panel-heading"><div><span className="step">04</span><h2>SIP 模拟器</h2></div><span className="secure-note">独立 Engine 进程</span></div>
       <p>可应答 OPTIONS；“忙线测试”对 INVITE 返回 486；Registrar 场景要求 Digest 测试账号并维护单个 Contact 绑定。“PCMU 测试呼叫”仅支持 UDP 信令及单向 8 kHz PCMU 测试音，会拒绝其他媒体，不接收对端音频。默认只监听本机，密码不保存。TLS 需要自行选择有效的 PEM 证书和私钥。</p>
       <div className="sip-simulator-controls"><label>监听地址 <input value={simBind} onChange={(event) => setSimBind(event.target.value)} disabled={!!simAddress} placeholder="127.0.0.1:5060" /></label><label>传输 <select value={simTransport} onChange={(event) => setSimTransport(event.target.value)} disabled={!!simAddress}><option value="udp">UDP</option><option value="tcp">TCP</option><option value="tls">TLS</option></select></label><label>场景 <select value={simScenario} onChange={(event) => setSimScenario(event.target.value)} disabled={!!simAddress}><option value="options">OPTIONS 应答</option><option value="busy">OPTIONS + INVITE 忙线 486</option><option value="registrar">OPTIONS + Digest REGISTER</option><option value="call">OPTIONS + PCMU 测试呼叫（仅 UDP）</option></select></label>{simScenario === "registrar" && <><label>测试账号 <input value={simUsername} onChange={(event) => setSimUsername(event.target.value)} disabled={!!simAddress} /></label><label>测试密码 <input type="password" value={simPassword} onChange={(event) => setSimPassword(event.target.value)} disabled={!!simAddress} autoComplete="new-password" /></label><label>Digest <select value={simDigest} onChange={(event) => setSimDigest(event.target.value)} disabled={!!simAddress}><option value="sha256">SHA-256</option><option value="md5">MD5 兼容</option></select></label></>}<button type="button" onClick={toggleSimulator} disabled={simBusy || (!simAddress && simScenario === "registrar" && (!simUsername || !simPassword)) || (!simAddress && simScenario === "call" && simTransport !== "udp") || (!simAddress && simTransport === "tls" && (!simTlsCert || !simTlsKey))}>{simBusy ? "处理中…" : simAddress ? "停止模拟器" : "启动模拟器"}</button></div>
@@ -179,6 +179,6 @@ export default function SipDiagnostics({ onAnalyzeMedia }: { onAnalyzeMedia: (pa
       {simAddress && <p className="sip-running">已监听 {simAddress}</p>}
       {simError && <div className="error-banner">{simError}</div>}
       {simEvents.length > 0 && <details><summary>最近事件（{simEvents.length}）</summary><pre className="sip-engine-events">{simEvents.join("\n")}</pre></details>}
-    </section>
+    </section>}
   </div>;
 }

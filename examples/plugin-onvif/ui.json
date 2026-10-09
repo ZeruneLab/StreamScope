@@ -1,0 +1,26 @@
+{
+  "schemaVersion": 1,
+  "views": [
+    {
+      "id": "diagnose",
+      "title": "ONVIF 标准接口诊断",
+      "components": [
+        { "type": "text", "text": "逐个验证设备服务与媒体接口。密码仅用于本次任务。" },
+        { "type": "input", "id": "endpoint", "label": "设备 IP 或 Device Service URL", "inputType": "text", "required": true },
+        { "type": "input", "id": "username", "label": "用户名", "inputType": "text", "required": false },
+        { "type": "input", "id": "password", "label": "密码", "inputType": "password", "required": false },
+        { "type": "input", "id": "timeoutSeconds", "label": "单接口超时秒数（默认 10）", "inputType": "number", "required": false },
+        { "type": "input", "id": "acceptInvalidCertificates", "label": "允许本次诊断使用自签名 HTTPS 证书", "inputType": "checkbox", "required": false },
+        { "type": "output", "title": "诊断数据" }
+      ]
+    },
+    {
+      "id": "discover",
+      "title": "ONVIF 局域网发现",
+      "components": [
+        { "type": "input", "id": "timeoutSeconds", "label": "发现时长秒数（默认 10）", "inputType": "number", "required": false },
+        { "type": "output", "title": "发现结果" }
+      ]
+    }
+  ]
+}

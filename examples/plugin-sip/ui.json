@@ -1,0 +1,50 @@
+{
+  "schemaVersion": 1,
+  "views": [
+    {
+      "id": "analyze",
+      "title": "SIP 抓包诊断",
+      "components": [
+        { "type": "input", "id": "path", "label": "抓包文件", "inputType": "file", "required": true },
+        { "type": "output", "title": "事务、呼叫与媒体关联" }
+      ]
+    },
+    {
+      "id": "preview",
+      "title": "SIP 模拟场景预览",
+      "components": [
+        { "type": "text", "text": "仅从抓包生成和查看场景；不会向设备发包。" },
+        { "type": "input", "id": "path", "label": "抓包文件", "inputType": "file", "required": true },
+        { "type": "input", "id": "callId", "label": "Call-ID", "inputType": "text", "required": true },
+        { "type": "input", "id": "captureSource", "label": "抓包发起端 IP:端口", "inputType": "text", "required": true },
+        { "type": "output", "title": "模拟预览计划" }
+      ]
+    },
+    {
+      "id": "execute",
+      "title": "SIP 抓包场景执行",
+      "components": [
+        { "type": "text", "text": "仅向你指定的单播设备发送抓包提取的 SIP 请求；执行前会重新验证场景。取消任务会终止插件及其执行器。" },
+        { "type": "input", "id": "path", "label": "抓包文件", "inputType": "file", "required": true },
+        { "type": "input", "id": "callId", "label": "Call-ID", "inputType": "text", "required": true },
+        { "type": "input", "id": "captureSource", "label": "抓包发起端 IP:端口", "inputType": "text", "required": true },
+        { "type": "input", "id": "target", "label": "目标设备 IP:端口", "inputType": "text", "required": true },
+        { "type": "input", "id": "overrides", "label": "步骤调整 JSON（可选）", "inputType": "text", "required": false },
+        { "type": "input", "id": "confirmSend", "label": "我确认向上述目标设备发包", "inputType": "checkbox", "required": true },
+        { "type": "output", "title": "模拟执行结果" }
+      ]
+    },
+    { "id": "probe", "title": "SIP OPTIONS 探测", "components": [
+      { "type": "input", "id": "target", "label": "目标 IP:端口", "inputType": "text", "required": true },
+      { "type": "select", "id": "transport", "label": "传输", "options": ["udp", "tcp", "tls"], "required": true },
+      { "type": "input", "id": "caCert", "label": "自签 CA", "inputType": "file", "required": false },
+      { "type": "input", "id": "serverName", "label": "证书主机名", "inputType": "text", "required": false },
+      { "type": "output", "title": "探测结果" }
+    ] },
+    { "id": "export", "title": "SIP 证据导出", "components": [
+      { "type": "input", "id": "dataPath", "label": "证据 JSON", "inputType": "file", "required": true },
+      { "type": "input", "id": "redacted", "label": "脱敏", "inputType": "checkbox", "required": false },
+      { "type": "output", "title": "导出结果" }
+    ] }
+  ]
+}

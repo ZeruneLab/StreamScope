@@ -1,0 +1,22 @@
+{
+  "schemaVersion": 1,
+  "id": "org.streamscope.sample",
+  "name": "示例文件检查",
+  "version": "1.0.0",
+  "publisher": {
+    "id": "org.streamscope",
+    "keyFingerprint": "sha256:0000000000000000000000000000000000000000000000000000000000000000"
+  },
+  "hostApi": "^1.0",
+  "platforms": [
+    { "os": "windows", "arch": "x86_64", "entry": "bin/streamscope-plugin-sample.exe" }
+  ],
+  "contributions": [
+    { "id": "org.streamscope.sample.inspect", "title": "示例检查", "kind": "analysis", "action": "inspect", "inputTypes": ["file"], "view": "main" }
+  ],
+  "ui": { "kind": "declarative", "file": "ui.json" },
+  "permissions": [{ "name": "file-read", "scope": ["user-selected-file"] }],
+  "dependencies": [],
+  "files": {},
+  "description": "用于验证签名包导入、动态侧栏和独立进程协议。"
+}

@@ -1,0 +1,19 @@
+{
+  "schemaVersion": 1,
+  "id": "org.streamscope.audio",
+  "name": "音频文件诊断",
+  "version": "0.2.0",
+  "publisher": { "id": "org.streamscope", "keyFingerprint": "sha256:0000000000000000000000000000000000000000000000000000000000000000" },
+  "hostApi": "^1.2",
+  "platforms": [{ "os": "windows", "arch": "x86_64", "entry": "bin/streamscope-plugin-audio.exe" }],
+  "contributions": [
+    { "id": "org.streamscope.audio.analyze", "title": "音频文件诊断（插件）", "kind": "analysis", "action": "analyze", "inputTypes": ["audio"], "view": "main" },
+    { "id": "org.streamscope.audio.export", "title": "音频格式导出（插件）", "kind": "analysis", "action": "export-audio", "inputTypes": ["audio"], "view": "export" },
+    { "id": "org.streamscope.audio.evidence", "title": "音频异常证据导出", "kind": "internal", "action": "export-evidence", "inputTypes": ["audio-evidence"], "view": "evidence" }
+  ],
+  "ui": { "kind": "declarative", "file": "ui.json" },
+  "permissions": [{ "name": "file-read", "scope": ["user-selected-file"] }, { "name": "report-write", "scope": ["host-report-root"] }],
+  "dependencies": [{ "id": "org.streamscope.ffmpeg", "version": "^7.1" }],
+  "files": {},
+  "description": "调用现有音频质量分析器的独立进程迁移验证版。"
+}

@@ -1,11 +1,18 @@
 {
   "name": "streamscope-desktop",
   "private": true,
-  "version": "0.1.10",
+  "version": "0.2.0",
   "type": "module",
   "scripts": {
     "dev": "vite",
     "build": "tsc && vite build",
+    "dev:core": "vite --mode core",
+    "build:core": "tsc && vite build --mode core",
+    "core:check": "node ../../scripts/core-host.mjs check",
+    "core:test": "node ../../scripts/core-host.mjs test",
+    "core:package": "node ../../scripts/core-host.mjs package",
+    "core:verify": "node ../../scripts/verify-core-host.mjs",
+    "plugin:verify-components": "node ../../scripts/verify-plugin-components.mjs",
     "tauri": "tauri"
   },
   "dependencies": {

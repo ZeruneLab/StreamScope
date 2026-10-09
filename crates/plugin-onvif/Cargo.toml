@@ -1,0 +1,10 @@
+[package]
+name = "streamscope-plugin-onvif"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+serde_json.workspace = true
+streamscope-onvif = { path = "../onvif" }
+streamscope-plugin-host = { path = "../plugin-host" }

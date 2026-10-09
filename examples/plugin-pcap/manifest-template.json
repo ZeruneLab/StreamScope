@@ -1,0 +1,15 @@
+{
+  "schemaVersion": 1,
+  "id": "org.streamscope.pcap",
+  "name": "PCAP 多流诊断",
+  "version": "0.2.0",
+  "publisher": { "id": "org.streamscope", "keyFingerprint": "sha256:0000000000000000000000000000000000000000000000000000000000000000" },
+  "hostApi": "^1.0",
+  "platforms": [{ "os": "windows", "arch": "x86_64", "entry": "bin/streamscope-plugin-pcap.exe" }],
+  "contributions": [{ "id": "org.streamscope.pcap.analyze", "title": "PCAP 多流诊断（插件）", "kind": "analysis", "action": "analyze", "inputTypes": ["pcap", "pcapng"], "view": "main" }],
+  "ui": { "kind": "declarative", "file": "ui.json" },
+  "permissions": [{ "name": "file-read", "scope": ["user-selected-pcap"] }, { "name": "report-write", "scope": ["host-report-root"] }],
+  "dependencies": [{ "id": "org.streamscope.ffmpeg", "version": "^7.1" }],
+  "files": {},
+  "description": "调用现有多流抓包分析器的独立进程迁移验证版。"
+}

@@ -11,6 +11,7 @@
     "forceConsistentCasingInFileNames": true,
     "module": "ESNext",
     "moduleResolution": "Bundler",
+    "paths": { "@streamscope/application": ["./src/App.tsx"] },
     "resolveJsonModule": true,
     "isolatedModules": true,
     "noEmit": true,
@@ -19,4 +20,3 @@
   "include": ["src"],
   "references": []
 }
-

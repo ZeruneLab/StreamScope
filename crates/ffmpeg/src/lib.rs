@@ -293,6 +293,18 @@ pub struct ProbeResult {
 }
 
 fn tool_command(name: &str) -> Command {
+    if matches!(name, "ffmpeg" | "ffprobe")
+        && let Some(directory) = std::env::var_os("STREAMSCOPE_FFMPEG_RUNTIME_DIR")
+    {
+        let executable = Path::new(&directory).join(if cfg!(windows) {
+            format!("{name}.exe")
+        } else {
+            name.to_owned()
+        });
+        if executable.is_file() {
+            return Command::new(executable);
+        }
+    }
     if let Ok(current_executable) = std::env::current_exe()
         && let Some(directory) = current_executable.parent()
     {

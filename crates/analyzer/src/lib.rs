@@ -1,4 +1,6 @@
 use chrono::Utc;
+mod video_syntax;
+pub use video_syntax::{inspect_annex_b_file_syntax, read_annex_b_nalu_range};
 use serde::Serialize;
 use std::io::{BufRead, BufReader};
 use std::path::PathBuf;

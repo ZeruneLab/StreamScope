@@ -14,20 +14,32 @@ path = "src/main.rs"
 
 [build-dependencies]
 tauri-build = { version = "2", features = [] }
+serde_json.workspace = true
+
+[features]
+default = ["compat"]
+compat = [
+    "dep:streamscope-analyzer", "dep:streamscope-core", "dep:streamscope-diagnostics",
+    "dep:streamscope-ffmpeg", "dep:streamscope-h264", "dep:streamscope-h265",
+    "dep:streamscope-onvif", "dep:streamscope-sip", "dep:streamscope-report",
+]
 
 [dependencies]
 serde.workspace = true
 serde_json.workspace = true
-streamscope-analyzer = { path = "../../../crates/analyzer" }
-streamscope-core = { path = "../../../crates/core" }
-streamscope-diagnostics = { path = "../../../crates/diagnostics" }
-streamscope-ffmpeg = { path = "../../../crates/ffmpeg" }
-streamscope-h264 = { path = "../../../crates/h264" }
-streamscope-h265 = { path = "../../../crates/h265" }
-streamscope-onvif = { path = "../../../crates/onvif" }
-streamscope-sip = { path = "../../../crates/sip" }
-streamscope-report = { path = "../../../crates/report" }
+streamscope-analyzer = { path = "../../../crates/analyzer", optional = true }
+streamscope-core = { path = "../../../crates/core", optional = true }
+streamscope-diagnostics = { path = "../../../crates/diagnostics", optional = true }
+streamscope-ffmpeg = { path = "../../../crates/ffmpeg", optional = true }
+streamscope-h264 = { path = "../../../crates/h264", optional = true }
+streamscope-h265 = { path = "../../../crates/h265", optional = true }
+streamscope-onvif = { path = "../../../crates/onvif", optional = true }
+streamscope-plugin-host = { path = "../../../crates/plugin-host" }
+semver.workspace = true
+streamscope-sip = { path = "../../../crates/sip", optional = true }
+streamscope-report = { path = "../../../crates/report", optional = true }
 tauri = { version = "2", features = ["protocol-asset"] }
 tauri-plugin-dialog = "2"
 tauri-plugin-process = "2"
 tauri-plugin-updater = "2"
+uuid.workspace = true

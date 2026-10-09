@@ -1,0 +1,8 @@
+{
+  "schemaVersion": 1,
+  "views": [
+    { "id": "runtime-info", "title": "FFmpeg 共享运行时", "components": [
+      { "type": "text", "text": "此包只向依赖插件提供 FFmpeg 工具，不提供独立侧栏入口。" }
+    ] }
+  ]
+}

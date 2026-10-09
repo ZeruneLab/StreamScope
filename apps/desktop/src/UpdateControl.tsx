@@ -29,7 +29,7 @@ function errorMessage(error: unknown): string {
   return String(error);
 }
 
-export function UpdateControl({ analysisRunning }: { analysisRunning: boolean }) {
+export function UpdateControl({ analysisRunning, coreOnly = false }: { analysisRunning: boolean; coreOnly?: boolean }) {
   const [currentVersion, setCurrentVersion] = useState("—");
   const [phase, setPhase] = useState<UpdatePhase>("idle");
   const [update, setUpdate] = useState<AvailableUpdate>(null);
@@ -141,8 +141,8 @@ export function UpdateControl({ analysisRunning }: { analysisRunning: boolean })
 
   return <>
     <div className="sidebar-footer updater-footer">
-      <div><span className="online-dot" />本机分析引擎</div>
-      <small>高级音画诊断 · v{currentVersion}</small>
+      <div><span className="online-dot" />{coreOnly ? "核心宿主" : "本机分析引擎"}</div>
+      <small>{coreOnly ? "插件与报告" : "高级音画诊断"} · v{currentVersion}</small>
       <button type="button" disabled={busy} onClick={() => { if (update) setDialogOpen(true); else void checkForUpdate(true); }}>
         {phase === "checking" ? "正在检查…" : phase === "available" || phase === "downloaded" ? "查看更新" : "检查更新"}
       </button>

@@ -1,0 +1,30 @@
+{
+  "schemaVersion": 1,
+  "id": "org.streamscope.sip",
+  "name": "SIP 抓包诊断与模拟",
+  "version": "0.2.0",
+  "publisher": {
+    "id": "org.streamscope",
+    "keyFingerprint": "sha256:0000000000000000000000000000000000000000000000000000000000000000"
+  },
+  "hostApi": "^1.2",
+  "platforms": [
+    { "os": "windows", "arch": "x86_64", "entry": "bin/streamscope-plugin-sip.exe" }
+  ],
+  "contributions": [
+    { "id": "org.streamscope.sip.analyze", "title": "SIP 抓包诊断（插件）", "kind": "analysis", "action": "analyze", "inputTypes": ["pcap", "pcapng"], "view": "analyze" },
+    { "id": "org.streamscope.sip.preview", "title": "SIP 模拟预览（插件）", "kind": "analysis", "action": "preview-replay", "inputTypes": ["pcap", "pcapng"], "view": "preview" },
+    { "id": "org.streamscope.sip.execute", "title": "向设备执行 SIP 场景（插件）", "kind": "simulation", "action": "execute-replay", "inputTypes": ["pcap", "pcapng"], "view": "execute" },
+    { "id": "org.streamscope.sip.probe", "title": "SIP OPTIONS 探测", "kind": "internal", "action": "probe", "inputTypes": ["sip-target"], "view": "probe" },
+    { "id": "org.streamscope.sip.export", "title": "SIP 证据导出", "kind": "internal", "action": "export-evidence", "inputTypes": ["sip-report"], "view": "export" }
+  ],
+  "ui": { "kind": "declarative", "file": "ui.json" },
+  "permissions": [
+    { "name": "file-read", "scope": ["user-selected-pcap"] },
+    { "name": "network-send", "scope": ["user-confirmed-sip-target"] },
+    { "name": "report-write", "scope": ["task-report"] }
+  ],
+  "dependencies": [],
+  "files": {},
+  "description": "独立进程解析 SIP 抓包，并在用户明确确认后通过独立执行器向指定设备重放安全场景。"
+}

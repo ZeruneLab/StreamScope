@@ -1,0 +1,10 @@
+{
+  "schemaVersion": 1,
+  "views": [{ "id": "main", "title": "RTSP 实时诊断", "components": [
+    { "type": "input", "id": "url", "label": "RTSP URL", "inputType": "text", "required": true },
+    { "type": "select", "id": "transport", "label": "传输方式（留空为 tcp）", "options": ["tcp", "udp", "compare"], "required": false },
+    { "type": "input", "id": "durationSeconds", "label": "分析时长秒数（默认 10）", "inputType": "number", "required": false },
+    { "type": "input", "id": "connectTimeoutSeconds", "label": "连接超时秒数（默认 10）", "inputType": "number", "required": false },
+    { "type": "output", "title": "分析任务" }
+  ] }]
+}

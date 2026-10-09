@@ -1,5 +1,5 @@
 import { useState, type FormEvent } from "react";
-import { invoke } from "@tauri-apps/api/core";
+import { invoke } from "./application-api";
 
 interface DiscoveredDevice {
   endpoint_reference: string | null;

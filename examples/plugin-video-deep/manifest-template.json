@@ -1,0 +1,18 @@
+{
+  "schemaVersion": 1,
+  "id": "org.streamscope.video-deep",
+  "name": "视频逐帧深度分析",
+  "version": "0.2.0",
+  "publisher": { "id": "org.streamscope", "keyFingerprint": "sha256:0000000000000000000000000000000000000000000000000000000000000000" },
+  "hostApi": "^1.2",
+  "platforms": [{ "os": "windows", "arch": "x86_64", "entry": "bin/streamscope-plugin-video-deep.exe" }],
+  "contributions": [
+    { "id": "org.streamscope.video-deep.inspect", "title": "视频逐帧深度分析（插件）", "kind": "analysis", "action": "inspect-frame", "inputTypes": ["video"], "view": "main" },
+    { "id": "org.streamscope.video-deep.report-tools", "title": "视频报告工作台工具", "kind": "internal", "action": "report-tools", "inputTypes": ["video", "analysis-report"], "view": "report-tools" }
+  ],
+  "ui": { "kind": "declarative", "file": "ui.json" },
+  "permissions": [{ "name": "file-read", "scope": ["user-selected-file"] }, { "name": "report-write", "scope": ["task-report"] }],
+  "dependencies": [{ "id": "org.streamscope.ffmpeg", "version": "^7.1" }],
+  "files": {},
+  "description": "使用官方共享运行时中的 video-worker 分析指定视频帧的 QP、运动矢量和内部块。"
+}

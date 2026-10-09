@@ -1,0 +1,36 @@
+[package]
+name = "streamscope-plugin-media"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+serde_json.workspace = true
+streamscope-analyzer = { path = "../analyzer" }
+streamscope-core = { path = "../core" }
+streamscope-plugin-host = { path = "../plugin-host" }
+streamscope-ffmpeg = { path = "../ffmpeg" }
+
+[[bin]]
+name = "streamscope-plugin-h264"
+path = "src/bin/h264.rs"
+
+[[bin]]
+name = "streamscope-plugin-h265"
+path = "src/bin/h265.rs"
+
+[[bin]]
+name = "streamscope-plugin-audio"
+path = "src/bin/audio.rs"
+
+[[bin]]
+name = "streamscope-plugin-rtsp"
+path = "src/bin/rtsp.rs"
+
+[[bin]]
+name = "streamscope-plugin-pcap"
+path = "src/bin/pcap.rs"
+
+[[bin]]
+name = "streamscope-plugin-video-deep"
+path = "src/bin/deep.rs"

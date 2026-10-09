@@ -4,7 +4,7 @@ import { basename, resolve } from "node:path";
 
 const root = resolve(import.meta.dirname, "..");
 const config = JSON.parse(await readFile(resolve(root, "apps/desktop/src-tauri/tauri.conf.json"), "utf8"));
-const releaseDir = resolve(root, "target-release/release");
+const releaseDir = resolve(root, process.argv[2] || "target-release/release");
 const filename = `StreamScope_${config.version}_x64-setup.exe`;
 const installer = await readFile(resolve(releaseDir, "bundle/nsis", filename));
 const signature = (await readFile(resolve(releaseDir, "bundle/nsis", `${filename}.sig`), "utf8")).trim();

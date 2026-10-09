@@ -1,0 +1,20 @@
+{
+  "schemaVersion": 1,
+  "views": [{
+    "id": "main",
+    "title": "视频逐帧深度分析",
+    "components": [
+      { "type": "text", "text": "选择视频文件并输入显示帧序号。结果由宿主绘制，不加载插件页面脚本。" },
+      { "type": "input", "id": "path", "label": "视频文件", "inputType": "file", "required": true },
+      { "type": "input", "id": "displayIndex", "label": "显示帧序号（从 0 开始）", "inputType": "number", "required": false },
+      { "type": "output", "title": "QP / 运动矢量 / 内部块" }
+    ]
+  }, { "id": "report-tools", "title": "视频报告工作台工具", "components": [
+    { "type": "input", "id": "path", "label": "同路视频样本", "inputType": "file", "required": true },
+    { "type": "input", "id": "reportPath", "label": "同路逐帧报告", "inputType": "file", "required": true },
+    { "type": "input", "id": "referencePath", "label": "参考视频", "inputType": "file", "required": false },
+    { "type": "input", "id": "displayIndex", "label": "显示帧号", "inputType": "number", "required": false },
+    { "type": "select", "id": "operation", "label": "操作", "options": ["extract_video_frame", "analyze_video_frame_blocks", "load_video_frame_syntax", "export_video_block_csv", "compare_video_reference"], "required": true },
+    { "type": "output", "title": "完整帧证据" }
+  ] }]
+}

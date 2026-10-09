@@ -1,0 +1,8 @@
+{
+  "schemaVersion": 1,
+  "views": [{ "id": "main", "title": "PCAP / PCAPNG 多流诊断", "components": [
+    { "type": "input", "id": "path", "label": "抓包文件", "inputType": "file", "required": true },
+    { "type": "input", "id": "streamIds", "label": "深入分析流 ID（逗号分隔，留空仅扫描）", "inputType": "text", "required": false },
+    { "type": "output", "title": "分析任务" }
+  ] }]
+}

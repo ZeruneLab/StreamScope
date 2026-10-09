@@ -5,6 +5,8 @@
 # Frontend dependencies and build output
 /apps/desktop/node_modules/
 /apps/desktop/dist/
+/apps/desktop/dist-core/
+/dist/
 
 # Tauri generated files and staged FFmpeg sidecars
 /apps/desktop/src-tauri/gen/schemas/

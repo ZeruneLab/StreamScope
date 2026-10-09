@@ -1,20 +1,16 @@
-use serde::{Deserialize, Serialize};
-use std::io::{BufRead, BufReader};
+use serde::Serialize;
+#[cfg(feature = "compat")]
+use serde::Deserialize;
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::process::{Child, Command, Stdio};
 use std::sync::Mutex;
-use std::time::{Duration, Instant};
-use streamscope_analyzer::{
-    AnalysisRun, AnalyzeOptions, AudioFileOptions, GeneratedReports, H264FileOptions,
-    H265FileOptions, PcapFileOptions,
-};
-use streamscope_core::{AnalysisResult, AudioIssue, AudioQualityInterval, Transport};
-use streamscope_onvif::{
-    DiagnosticOptions as OnvifDiagnosticOptions, DiscoveredDevice, DiscoveryOptions,
-    OnvifDiagnosticResult,
-};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::Duration;
+use streamscope_plugin_host::{ArtifactStore, Catalog, CatalogEntry, InstalledPlugin, PackagePreview, PluginCancelHandle, PluginProcess, PluginReportV2, PluginStore, UiDocument, stage_linked_file_inputs, stage_media_outputs, attach_report_workflows, workflow_action, linked_references, validate_media_input};
 use tauri::{Emitter, Manager};
 
+#[cfg(feature = "compat")]
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct AnalyzeCommand {
@@ -24,6 +20,7 @@ struct AnalyzeCommand {
     connect_timeout_seconds: u64,
 }
 
+#[cfg(feature = "compat")]
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct HistoryEntry {
@@ -34,6 +31,7 @@ struct HistoryEntry {
     critical_count: usize,
 }
 
+#[cfg(feature = "compat")]
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct ExportMediaRequest {
@@ -45,17 +43,460 @@ struct ExportMediaRequest {
     end_ms: Option<u64>,
 }
 
+#[cfg(feature = "compat")]
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct ExportAudioEvidenceRequest {
     destination_path: String,
     format: String,
-    issues: Vec<AudioIssue>,
-    intervals: Vec<AudioQualityInterval>,
+    issues: Vec<streamscope_core::AudioIssue>,
+    intervals: Vec<streamscope_core::AudioQualityInterval>,
 }
 
+#[cfg(feature = "compat")]
 #[derive(Default)]
-struct SipEngineState(Mutex<Option<(Child, String)>>);
+struct SipEngineState(Mutex<Option<(std::process::Child, String)>>);
+
+#[derive(Default)]
+struct PluginState(Arc<Mutex<PluginRuntimeState>>);
+
+#[derive(Default)]
+struct PluginRuntimeState {
+    active: HashMap<String, (PluginCancelHandle, Arc<AtomicBool>)>,
+    prepared: HashMap<String, (CatalogEntry, PathBuf)>,
+}
+
+fn ensure_plugins_idle(state: &PluginRuntimeState) -> Result<(), String> {
+    if state.active.is_empty() { Ok(()) } else { Err("有插件任务正在运行，请等待结束或先取消".into()) }
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct PluginExecution {
+    result: serde_json::Value,
+    report_id: String,
+}
+
+#[derive(Clone, serde::Deserialize, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct ContinuationReference {
+    report_id: String,
+    action_id: String,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct PreparedContinuation {
+    reference: ContinuationReference,
+    plugin_id: String,
+    contribution_id: String,
+    fields: std::collections::BTreeMap<String, String>,
+    context: String,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct PreparedPlugin {
+    token: String,
+    preview: PackagePreview,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct DependencyResolution {
+    installed: Option<InstalledPlugin>,
+    prepared: Option<PreparedPlugin>,
+}
+
+fn official_catalog_config() -> Result<(&'static str, &'static str), String> {
+    let url = option_env!("STREAMSCOPE_PLUGIN_CATALOG_URL")
+        .ok_or_else(|| "此构建尚未配置官方插件目录地址".to_string())?;
+    let public_key = option_env!("STREAMSCOPE_PLUGIN_CATALOG_PUBLIC_KEY")
+        .ok_or_else(|| "此构建尚未配置官方插件目录公钥".to_string())?;
+    Ok((url, public_key))
+}
+
+#[tauri::command]
+async fn check_official_plugins() -> Result<Catalog, String> {
+    let (url, public_key) = official_catalog_config()?;
+    tauri::async_runtime::spawn_blocking(move || {
+        let mut catalog = streamscope_plugin_host::fetch_signed_catalog(url, public_key)
+            .map_err(|error| error.to_string())?;
+        catalog.packages.retain(CatalogEntry::compatible);
+        catalog.packages.sort_by(|a, b| a.id.cmp(&b.id).then_with(|| {
+            semver::Version::parse(&b.version).ok().cmp(&semver::Version::parse(&a.version).ok())
+        }));
+        Ok(catalog)
+    }).await.map_err(|error| error.to_string())?
+}
+
+#[tauri::command]
+async fn prepare_official_plugin(app: tauri::AppHandle, state: tauri::State<'_, PluginState>, id: String, version: String) -> Result<PreparedPlugin, String> {
+    let runtime = state.0.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let (url, public_key) = official_catalog_config()?;
+        let catalog = streamscope_plugin_host::fetch_signed_catalog(url, public_key)
+            .map_err(|error| error.to_string())?;
+        let entry = catalog.packages.into_iter().find(|entry| {
+            entry.id == id && entry.version == version
+                && entry.compatible()
+        }).ok_or_else(|| "官方目录中没有适用于此系统的插件版本".to_string())?;
+        prepare_catalog_entry(&app, &runtime, entry)
+    }).await.map_err(|error| error.to_string())?
+}
+
+fn prepare_catalog_entry(app: &tauri::AppHandle, runtime: &Mutex<PluginRuntimeState>, entry: CatalogEntry) -> Result<PreparedPlugin, String> {
+    let token = uuid::Uuid::new_v4().to_string();
+    let root = app.path().local_data_dir().map_err(|error| error.to_string())?
+        .join("StreamScope").join("plugin-downloads");
+    let path = root.join(format!("{token}.ssp"));
+    let outcome = (|| {
+        streamscope_plugin_host::download_catalog_package(&entry, &path).map_err(|error| error.to_string())?;
+        let preview = plugin_store(app)?.preview(&path).map_err(|error| error.to_string())?;
+        runtime.lock().map_err(|_| "插件状态锁异常".to_string())?
+            .prepared.insert(token.clone(), (entry, path.clone()));
+        Ok(PreparedPlugin { token, preview })
+    })();
+    if outcome.is_err() { let _ = std::fs::remove_file(path); }
+    outcome
+}
+
+#[tauri::command]
+async fn resolve_plugin_dependency(app: tauri::AppHandle, state: tauri::State<'_, PluginState>, id: String, requirements: Vec<String>, selected_version: Option<String>) -> Result<DependencyResolution, String> {
+    let runtime = state.0.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        if let Some(version) = selected_version {
+            if !streamscope_plugin_host::version_satisfies(&version, &requirements).map_err(|error| error.to_string())? {
+                return Err(format!("依赖 {id} 的已选版本 {version} 不满足 {}；未执行安装", requirements.join("、")));
+            }
+            return Ok(DependencyResolution { installed: None, prepared: None });
+        }
+        let installed = plugin_store(&app)?.list().map_err(|error| error.to_string())?;
+        if let Some(item) = installed.into_iter().find(|item| item.manifest.id == id
+            && streamscope_plugin_host::version_satisfies(&item.manifest.version, &requirements).unwrap_or(false)) {
+            return Ok(DependencyResolution { installed: Some(item), prepared: None });
+        }
+        let (url, public_key) = official_catalog_config()?;
+        let catalog = streamscope_plugin_host::fetch_signed_catalog(url, public_key).map_err(|error| error.to_string())?;
+        let entry = catalog.select(&id, &requirements).map_err(|error| error.to_string())?.clone();
+        Ok(DependencyResolution { installed: None, prepared: Some(prepare_catalog_entry(&app, &runtime, entry)?) })
+    }).await.map_err(|error| error.to_string())?
+}
+
+#[tauri::command]
+fn install_prepared_plugin(app: tauri::AppHandle, state: tauri::State<'_, PluginState>, token: String, package_sha256: String, fingerprint: String) -> Result<InstalledPlugin, String> {
+    let mut guard = state.0.lock().map_err(|_| "插件状态锁异常".to_string())?;
+    ensure_plugins_idle(&guard)?;
+    let (entry, path) = guard.prepared.get(&token).ok_or_else(|| "下载任务不存在".to_string())?;
+    if !entry.matches_confirmation(&package_sha256, &fingerprint) {
+        return Err("确认的包或发布者与签名目录不一致".into());
+    }
+    let installed = plugin_store(&app)?.install(path, &package_sha256, &fingerprint)
+        .map_err(|error| error.to_string())?;
+    if let Some((_, path)) = guard.prepared.remove(&token) { let _ = std::fs::remove_file(path); }
+    Ok(installed)
+}
+
+#[tauri::command]
+fn discard_prepared_plugin(state: tauri::State<'_, PluginState>, token: String) -> Result<(), String> {
+    let mut guard = state.0.lock().map_err(|_| "插件状态锁异常".to_string())?;
+    if let Some((_, path)) = guard.prepared.remove(&token) { let _ = std::fs::remove_file(path); }
+    Ok(())
+}
+
+fn plugin_store(app: &tauri::AppHandle) -> Result<PluginStore, String> {
+    let root = app.path().local_data_dir().map_err(|error| error.to_string())?
+        .join("StreamScope").join("plugins");
+    Ok(PluginStore::new(root))
+}
+
+fn plugin_reports_root(app: &tauri::AppHandle) -> Result<PathBuf, String> {
+    Ok(default_report_root(app)?.join("plugins-v2"))
+}
+
+#[tauri::command]
+fn preview_plugin(app: tauri::AppHandle, path: String) -> Result<PackagePreview, String> {
+    plugin_store(&app)?.preview(Path::new(&path)).map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+fn list_plugins(app: tauri::AppHandle) -> Result<Vec<InstalledPlugin>, String> {
+    plugin_store(&app)?.list().map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+fn load_plugin_ui(app: tauri::AppHandle, id: String) -> Result<UiDocument, String> {
+    plugin_store(&app)?.ui_document(&id).map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+fn list_plugin_reports(app: tauri::AppHandle) -> Result<Vec<PluginReportV2>, String> {
+    streamscope_plugin_host::list_plugin_reports(&plugin_reports_root(&app)?)
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+async fn load_plugin_report(app: tauri::AppHandle, report_id: String) -> Result<PluginReportV2, String> {
+    tauri::async_runtime::spawn_blocking(move || read_workflow_report(&app, &report_id))
+        .await.map_err(|error| error.to_string())?
+}
+
+fn read_workflow_report(app: &tauri::AppHandle, report_id: &str) -> Result<PluginReportV2, String> {
+    let mut report = streamscope_plugin_host::load_plugin_report(&plugin_reports_root(app)?, report_id)
+        .map_err(|error| error.to_string())?;
+    let store = ArtifactStore::new(default_report_root(app)?);
+    for (id, saved) in &mut report.plugin_results {
+        if saved.result.get("hostActions").is_none() {
+            enrich_workflow_result(&store, id, &mut saved.result, &mut report.artifacts);
+        }
+    }
+    Ok(report)
+}
+
+fn enrich_workflow_result(store: &ArtifactStore, id: &str, result: &mut serde_json::Value, references: &mut Vec<streamscope_plugin_host::ArtifactReference>) {
+    let mut enriched = result.clone();
+    let mut linked = references.clone();
+    match attach_report_workflows(store, id, &mut enriched, &mut linked) {
+        Ok(()) => { *result = enriched; *references = linked; }
+        Err(error) => { result["hostWorkflowWarning"] = serde_json::json!(format!("分析结果保留；联动样本不可用：{error}")); }
+    }
+}
+
+#[tauri::command]
+async fn prepare_plugin_continuation(app: tauri::AppHandle, reference: ContinuationReference) -> Result<PreparedContinuation, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let report = read_workflow_report(&app, &reference.report_id)?;
+        let next = workflow_action(&report, &reference.action_id).map_err(|error| error.to_string())?;
+        let store = plugin_store(&app)?;
+        let plugin = store.list().map_err(|error| error.to_string())?.into_iter()
+            .find(|plugin| plugin.manifest.id == next.plugin_id && plugin.enabled)
+            .ok_or_else(|| format!("请先在插件管理中安装并启用 {}；来源报告会保留", next.plugin_id))?;
+        let contribution = plugin.manifest.contributions.iter().find(|entry| entry.action == next.action)
+            .ok_or_else(|| "目标插件版本未提供此联动动作，请更新插件".to_string())?;
+        let ui = store.ui_document(&next.plugin_id).map_err(|error| error.to_string())?;
+        let mut fields = next.input.clone();
+        let mut input = serde_json::to_value(&fields).map_err(|error| error.to_string())?.as_object().unwrap().clone();
+        let linked = linked_references(&report, &next).map_err(|error| error.to_string())?;
+        stage_linked_file_inputs(&ArtifactStore::new(default_report_root(&app)?), &ui, &contribution.view,
+            &mut input, &linked, &mut |_, _, _| {}, &|| false).map_err(|error| error.to_string())?;
+        for field in linked.keys() {
+            fields.insert(field.clone(), frontend_file_path(Path::new(input[field].as_str().unwrap())));
+        }
+        Ok(PreparedContinuation { reference, plugin_id: next.plugin_id, contribution_id: contribution.id.clone(), fields, context: next.context })
+    }).await.map_err(|error| error.to_string())?
+}
+
+#[tauri::command]
+async fn resolve_plugin_artifact(app: tauri::AppHandle, report_id: String, artifact_id: String) -> Result<String, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let report = read_workflow_report(&app, &report_id)?;
+        let reference = report.artifacts.iter().find(|artifact| artifact.id == artifact_id)
+            .ok_or_else(|| "报告未引用该产物".to_string())?;
+        let path = ArtifactStore::new(default_report_root(&app)?).resolve_reference(reference)
+            .map_err(|error| error.to_string())?;
+        Ok(frontend_file_path(&path))
+    }).await.map_err(|error| error.to_string())?
+}
+
+#[tauri::command]
+fn install_plugin(app: tauri::AppHandle, state: tauri::State<'_, PluginState>, path: String, package_sha256: String, fingerprint: String) -> Result<InstalledPlugin, String> {
+    let guard = state.0.lock().map_err(|_| "插件状态锁异常".to_string())?;
+    ensure_plugins_idle(&guard)?;
+    plugin_store(&app)?.install(Path::new(&path), &package_sha256, &fingerprint).map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+fn enable_plugin(app: tauri::AppHandle, state: tauri::State<'_, PluginState>, id: String, enabled: bool) -> Result<(), String> {
+    let guard = state.0.lock().map_err(|_| "插件状态锁异常".to_string())?;
+    ensure_plugins_idle(&guard)?;
+    plugin_store(&app)?.set_enabled(&id, enabled).map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+fn uninstall_plugin(app: tauri::AppHandle, state: tauri::State<'_, PluginState>, id: String) -> Result<(), String> {
+    let guard = state.0.lock().map_err(|_| "插件状态锁异常".to_string())?;
+    ensure_plugins_idle(&guard)?;
+    plugin_store(&app)?.uninstall(&id).map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+async fn execute_plugin(app: tauri::AppHandle, state: tauri::State<'_, PluginState>, task_id: String, id: String, action: String, input: serde_json::Value, continuation: Option<ContinuationReference>) -> Result<PluginExecution, String> {
+    if task_id.len() > 128 || task_id.is_empty() { return Err("插件任务 ID 无效".into()); }
+    let runtime = state.0.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let cancelled = Arc::new(AtomicBool::new(false));
+        let (item, mut process) = {
+            let mut guard = runtime.lock().map_err(|_| "插件状态锁异常".to_string())?;
+            if guard.active.contains_key(&task_id) { return Err("插件任务 ID 已存在".into()); }
+            let store = plugin_store(&app)?;
+            let item = store.list().map_err(|error| error.to_string())?.into_iter()
+                .find(|item| item.manifest.id == id && item.enabled)
+                .ok_or_else(|| "插件未安装或已禁用".to_string())?;
+            if !item.manifest.contributions.iter().any(|contribution| contribution.action == action) {
+                return Err("插件未声明该动作".into());
+            }
+            let executable = store.executable(&id).map_err(|error| error.to_string())?;
+            let runtime_directory = if item.manifest.dependencies.iter().any(|dependency| dependency.id == "org.streamscope.ffmpeg") {
+                let ffmpeg = store.runtime_file("org.streamscope.ffmpeg", "bin/ffmpeg.exe")
+                    .map_err(|error| error.to_string())?;
+                store.runtime_file("org.streamscope.ffmpeg", "bin/ffprobe.exe")
+                    .map_err(|error| error.to_string())?;
+                if item.manifest.id == "org.streamscope.video-deep" {
+                    store.runtime_file("org.streamscope.ffmpeg", "bin/video-worker.exe")
+                        .map_err(|error| error.to_string())?;
+                }
+                Some(ffmpeg.parent().ok_or_else(|| "FFmpeg 运行时目录无效".to_string())?.to_path_buf())
+            } else { None };
+            let process = PluginProcess::spawn_with_runtime(&executable, runtime_directory.as_deref())
+                .map_err(|error| error.to_string())?;
+            guard.active.insert(task_id.clone(), (process.cancel_handle(), cancelled.clone()));
+            (item, process)
+        };
+        let outcome = (|| {
+            let mut trusted_input = input.as_object().cloned().ok_or_else(|| "插件输入必须是对象".to_string())?;
+            let store = plugin_store(&app)?;
+            let contribution = item.manifest.contributions.iter().find(|entry| entry.action == action)
+                .ok_or_else(|| "插件未声明该动作".to_string())?;
+            let ui = store.ui_document(&id).map_err(|error| error.to_string())?;
+            let artifacts = ArtifactStore::new(default_report_root(&app)?);
+            let (linked, source_context) = if let Some(source) = &continuation {
+                let report = read_workflow_report(&app, &source.report_id)?;
+                let next = workflow_action(&report, &source.action_id).map_err(|error| error.to_string())?;
+                if next.plugin_id != id || next.action != action { return Err("联动目标与来源报告不匹配".into()); }
+                (linked_references(&report, &next).map_err(|error| error.to_string())?, Some(next.context))
+            } else { (std::collections::BTreeMap::new(), None) };
+            let mut references = stage_linked_file_inputs(&artifacts, &ui, &contribution.view, &mut trusted_input, &linked, &mut |field, copied, total| {
+                let percent = if total == 0 { 5 } else { (copied.saturating_mul(5) / total).min(5) };
+                let _ = app.emit("plugin-progress", serde_json::json!({
+                    "taskId":task_id,"progress":{"percent":percent,"stage":"准备产物","detail":format!("{field}: {copied}/{total} B")}
+                }));
+            }, &|| cancelled.load(Ordering::Relaxed))
+                .map_err(|error| error.to_string())?;
+            validate_media_input(&id, &serde_json::Value::Object(trusted_input.clone())).map_err(|error| error.to_string())?;
+            if item.manifest.permissions.iter().any(|permission| permission.name == "report-write") {
+                trusted_input.insert("_hostOutputRoot".into(), serde_json::Value::String(default_report_root(&app)?.to_string_lossy().into_owned()));
+            } else {
+                trusted_input.remove("_hostOutputRoot");
+            }
+            let mut result = process.request("execute", serde_json::json!({"action": action, "input": trusted_input}), Duration::from_secs(600), |progress| {
+                let _ = app.emit("plugin-progress", serde_json::json!({"taskId":task_id,"progress":progress}));
+            })
+                .map_err(|error| error.to_string())?;
+            stage_media_outputs(&artifacts, &mut result, &mut references).map_err(|error| error.to_string())?;
+            let _ = app.emit("plugin-progress", serde_json::json!({"taskId":task_id,"progress":{"percent":99,"stage":"关联媒体样本","detail":"正在保存同源分析入口"}}));
+            enrich_workflow_result(&artifacts, &id, &mut result, &mut references);
+            if let Some(source) = &continuation {
+                result["workflowSource"] = serde_json::json!({"reference":source,"context":source_context});
+            }
+            let reports_root = plugin_reports_root(&app)?;
+            let directory = streamscope_plugin_host::save_plugin_report_with_artifacts(&reports_root, &item, &action, &result, &references)
+                .map_err(|error| error.to_string())?;
+            let report_id = directory.file_name().and_then(|name| name.to_str())
+                .and_then(|name| name.strip_prefix("plugin-report-"))
+                .ok_or_else(|| "插件报告目录无效".to_string())?.to_owned();
+            let report = streamscope_plugin_host::load_plugin_report(&reports_root, &report_id)
+                .map_err(|error| error.to_string())?;
+            Ok(PluginExecution { result: report.plugin_results[&id].result.clone(), report_id })
+        })();
+        if let Ok(mut guard) = runtime.lock() { guard.active.remove(&task_id); }
+        outcome
+    }).await.map_err(|error| error.to_string())?
+}
+
+#[tauri::command]
+fn cancel_plugin(state: tauri::State<'_, PluginState>, task_id: String) -> Result<(), String> {
+    let (handle, cancelled) = state.0.lock().map_err(|_| "插件状态锁异常".to_string())?
+        .active.get(&task_id).cloned().ok_or_else(|| "插件任务未运行".to_string())?;
+    cancelled.store(true, Ordering::Relaxed);
+    handle.cancel().map_err(|error| error.to_string())
+}
+
+mod core_reports;
+use core_reports::{export_plugin_artifact, list_legacy_reports, load_report_html};
+#[cfg(not(feature = "compat"))]
+use core_reports::{read_analysis_report, list_analysis_reports, manage_analysis_report, save_report_file, read_analysis_attachment, read_plugin_data, stage_plugin_json};
+
+fn default_report_root(app: &tauri::AppHandle) -> Result<PathBuf, String> {
+    app.path()
+        .document_dir()
+        .map(|path| path.join("StreamScope").join("reports"))
+        .map_err(|error| format!("无法确定文档目录：{error}"))
+}
+
+#[cfg(windows)]
+fn frontend_file_path(path: &Path) -> String {
+    let value = path.as_os_str().to_string_lossy();
+    if let Some(path) = value.strip_prefix(r"\\?\UNC\") {
+        return format!(r"\\{path}");
+    }
+    value.strip_prefix(r"\\?\").unwrap_or(&value).to_owned()
+}
+
+#[cfg(not(windows))]
+fn frontend_file_path(path: &Path) -> String {
+    path.display().to_string()
+}
+
+#[cfg(feature = "compat")]
+pub use legacy::run;
+
+#[cfg(not(feature = "compat"))]
+#[cfg_attr(mobile, tauri::mobile_entry_point)]
+pub fn run() {
+    tauri::Builder::default()
+        .manage(PluginState::default())
+        .plugin(tauri_plugin_dialog::init())
+        .plugin(tauri_plugin_process::init())
+        .plugin(tauri_plugin_updater::Builder::new().build())
+        .invoke_handler(tauri::generate_handler![
+            check_official_plugins,
+            prepare_official_plugin,
+            resolve_plugin_dependency,
+            install_prepared_plugin,
+            discard_prepared_plugin,
+            preview_plugin,
+            list_plugins,
+            load_plugin_ui,
+            list_plugin_reports,
+            load_plugin_report,
+            prepare_plugin_continuation,
+            resolve_plugin_artifact,
+            install_plugin,
+            enable_plugin,
+            uninstall_plugin,
+            execute_plugin,
+            cancel_plugin,
+            list_legacy_reports,
+            export_plugin_artifact,
+            load_report_html,
+            read_analysis_report,
+            list_analysis_reports,
+            manage_analysis_report,
+            save_report_file,
+            read_analysis_attachment,
+            read_plugin_data,
+            stage_plugin_json
+        ])
+        .run(tauri::generate_context!())
+        .expect("StreamScope 核心宿主启动失败");
+}
+
+#[cfg(feature = "compat")]
+mod legacy {
+use super::*;
+use std::io::{BufRead, BufReader};
+use std::process::{Command, Stdio};
+use std::time::Instant;
+use streamscope_analyzer::{
+    AnalysisRun, AnalyzeOptions, AudioFileOptions, GeneratedReports, H264FileOptions,
+    H265FileOptions, PcapFileOptions,
+    read_annex_b_nalu_range,
+};
+use streamscope_core::{AnalysisResult, AudioIssue, AudioQualityInterval, Transport};
+use streamscope_onvif::{
+    DiagnosticOptions as OnvifDiagnosticOptions, DiscoveredDevice, DiscoveryOptions,
+    OnvifDiagnosticResult,
+};
 
 fn sip_engine_executable() -> Result<PathBuf, String> {
     let executable = std::env::current_exe()
@@ -942,20 +1383,6 @@ fn resolve_report_video_source(
     Ok((directory, source, result))
 }
 
-#[cfg(windows)]
-fn frontend_file_path(path: &Path) -> String {
-    let value = path.as_os_str().to_string_lossy();
-    if let Some(path) = value.strip_prefix(r"\\?\UNC\") {
-        return format!(r"\\{path}");
-    }
-    value.strip_prefix(r"\\?\").unwrap_or(&value).to_owned()
-}
-
-#[cfg(not(windows))]
-fn frontend_file_path(path: &Path) -> String {
-    path.display().to_string()
-}
-
 #[tauri::command]
 async fn extract_video_frame(
     app: tauri::AppHandle,
@@ -1143,69 +1570,6 @@ async fn analyze_video_frame_blocks(
     })
     .await
     .map_err(|error| format!("视频块分析任务异常结束：{error}"))?
-}
-
-fn read_annex_b_nalu_range(
-    source: &Path,
-    first_nalu: u64,
-    last_nalu: u64,
-) -> std::io::Result<Vec<(u64, u64, Vec<u8>)>> {
-    let mut reader = BufReader::with_capacity(64 * 1024, std::fs::File::open(source)?);
-    let mut selected = Vec::new();
-    let mut current = Vec::new();
-    let mut pending_zeros = 0_usize;
-    let mut active_index = 0_u64;
-    let mut active_offset = 0_u64;
-    let mut absolute = 0_u64;
-
-    loop {
-        let buffer = reader.fill_buf()?;
-        if buffer.is_empty() {
-            if (first_nalu..=last_nalu).contains(&active_index) {
-                current.extend(std::iter::repeat_n(0, pending_zeros));
-                if !current.is_empty() {
-                    selected.push((active_index, active_offset, current));
-                }
-            }
-            return Ok(selected);
-        }
-        let mut consumed = 0_usize;
-        let mut complete = false;
-        for &byte in buffer {
-            let position = absolute + consumed as u64;
-            consumed += 1;
-            if byte == 0 {
-                pending_zeros += 1;
-                continue;
-            }
-            if byte == 1 && pending_zeros >= 2 {
-                if (first_nalu..=last_nalu).contains(&active_index) && !current.is_empty() {
-                    selected.push((active_index, active_offset, std::mem::take(&mut current)));
-                } else {
-                    current.clear();
-                }
-                if active_index >= last_nalu {
-                    complete = true;
-                    pending_zeros = 0;
-                    break;
-                }
-                active_index += 1;
-                active_offset = position + 1;
-                pending_zeros = 0;
-                continue;
-            }
-            if (first_nalu..=last_nalu).contains(&active_index) {
-                current.extend(std::iter::repeat_n(0, pending_zeros));
-                current.push(byte);
-            }
-            pending_zeros = 0;
-        }
-        reader.consume(consumed);
-        absolute += consumed as u64;
-        if complete {
-            return Ok(selected);
-        }
-    }
 }
 
 fn rebase_syntax_hex(hex: &str, offset: u64) -> String {
@@ -1625,25 +1989,6 @@ fn delete_report_directory(app: tauri::AppHandle, report_directory: String) -> R
 }
 
 #[tauri::command]
-fn load_report_html(app: tauri::AppHandle, report_path: String) -> Result<String, String> {
-    let root = default_report_root(&app)?
-        .canonicalize()
-        .map_err(|error| format!("报告根目录不可用：{error}"))?;
-    let path = PathBuf::from(report_path)
-        .canonicalize()
-        .map_err(|error| format!("报告文件不可用：{error}"))?;
-    if !path.starts_with(root)
-        || !matches!(
-            path.file_name().and_then(|name| name.to_str()),
-            Some("report.html" | "comparison.html")
-        )
-    {
-        return Err("只能预览 StreamScope HTML 报告".into());
-    }
-    std::fs::read_to_string(path).map_err(|error| format!("读取报告失败：{error}"))
-}
-
-#[tauri::command]
 fn load_analysis_run(
     app: tauri::AppHandle,
     report_directory: String,
@@ -1700,21 +2045,32 @@ fn load_analysis_run(
     })
 }
 
-fn default_report_root(app: &tauri::AppHandle) -> Result<PathBuf, String> {
-    app.path()
-        .document_dir()
-        .map(|path| path.join("StreamScope").join("reports"))
-        .map_err(|error| format!("无法确定文档目录：{error}"))
-}
-
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
         .manage(SipEngineState::default())
+        .manage(PluginState::default())
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_process::init())
         .plugin(tauri_plugin_updater::Builder::new().build())
         .invoke_handler(tauri::generate_handler![
+            check_official_plugins,
+            prepare_official_plugin,
+            resolve_plugin_dependency,
+            install_prepared_plugin,
+            discard_prepared_plugin,
+            preview_plugin,
+            list_plugins,
+            load_plugin_ui,
+            list_plugin_reports,
+            load_plugin_report,
+            prepare_plugin_continuation,
+            resolve_plugin_artifact,
+            install_plugin,
+            enable_plugin,
+            uninstall_plugin,
+            execute_plugin,
+            cancel_plugin,
             analyze_rtsp,
             analyze_h264_file,
             analyze_h265_file,
@@ -1743,6 +2099,8 @@ pub fn run() {
             load_video_frame_syntax,
             export_video_block_csv,
             list_analysis_history,
+            list_legacy_reports,
+            export_plugin_artifact,
             load_report_html,
             load_analysis_run,
             open_report_directory,
@@ -1990,4 +2348,5 @@ mod tests {
         assert!(rows[3].starts_with("internal,0,32,48,8,8,,,27"));
         assert!(rows[3].ends_with(",\"2NxN\",\"\",\"inter\",2,5"));
     }
+}
 }

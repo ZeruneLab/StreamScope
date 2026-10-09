@@ -248,9 +248,22 @@ fn main() {
     );
     println!("cargo:rerun-if-changed=windows/app.manifest");
     println!("cargo:rerun-if-changed=windows/app.rc");
-    stage_ffmpeg();
-    stage_video_worker();
-    stage_sip_engine();
+    if std::env::var_os("CARGO_FEATURE_COMPAT").is_some() {
+        stage_ffmpeg();
+        stage_video_worker();
+        stage_sip_engine();
+    } else {
+        let config: serde_json::Value = std::env::var("TAURI_CONFIG")
+            .ok()
+            .and_then(|value| serde_json::from_str(&value).ok())
+            .expect("核心宿主必须使用 tauri.core.conf.json；运行 node scripts/core-host.mjs check|test|build|package");
+        assert!(
+            config.pointer("/bundle/externalBin").and_then(|value| value.as_array()).is_some_and(|files| files.is_empty())
+                && config.pointer("/bundle/resources").and_then(|value| value.as_array()).is_some_and(|files| files.is_empty())
+                && config.pointer("/build/frontendDist").and_then(|value| value.as_str()) == Some("../dist-core"),
+            "核心宿主不能使用兼容版界面或随包执行器配置"
+        );
+    }
     if std::env::var("TARGET").is_ok_and(|target| target.ends_with("windows-gnu")) {
         tauri_build::try_build(
             tauri_build::Attributes::new()

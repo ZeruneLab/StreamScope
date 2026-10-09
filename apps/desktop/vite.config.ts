@@ -1,10 +1,15 @@
 import { defineConfig } from "vite";
 import react from "@vitejs/plugin-react";
+import { fileURLToPath } from "node:url";
 
 const host = process.env.TAURI_DEV_HOST;
 
-export default defineConfig({
+export default defineConfig(({ mode }) => ({
   plugins: [react()],
+  resolve: {
+    alias: { "@streamscope/application": fileURLToPath(new URL(mode === "core" ? "./src/CoreApp.tsx" : "./src/App.tsx", import.meta.url)) },
+  },
+  build: { outDir: mode === "core" ? "dist-core" : "dist" },
   clearScreen: false,
   server: {
     port: 1420,
@@ -21,5 +26,4 @@ export default defineConfig({
       ignored: ["**/src-tauri/**"],
     },
   },
-});
-
+}));

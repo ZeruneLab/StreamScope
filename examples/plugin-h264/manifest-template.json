@@ -1,0 +1,18 @@
+{
+  "schemaVersion": 1,
+  "id": "org.streamscope.h264",
+  "name": "H.264 文件诊断",
+  "version": "0.2.0",
+  "publisher": { "id": "org.streamscope", "keyFingerprint": "sha256:0000000000000000000000000000000000000000000000000000000000000000" },
+  "hostApi": "^1.1",
+  "platforms": [{ "os": "windows", "arch": "x86_64", "entry": "bin/streamscope-plugin-h264.exe" }],
+  "contributions": [
+    { "id": "org.streamscope.h264.analyze", "title": "H.264 文件诊断（插件）", "kind": "analysis", "action": "analyze", "inputTypes": ["h264"], "view": "main" },
+    { "id": "org.streamscope.h264.syntax", "title": "H.264 NALU 语法 / HEX", "kind": "analysis", "action": "inspect-nalus", "inputTypes": ["h264"], "view": "syntax" }
+  ],
+  "ui": { "kind": "declarative", "file": "ui.json" },
+  "permissions": [{ "name": "file-read", "scope": ["user-selected-file"] }, { "name": "report-write", "scope": ["host-report-root"] }],
+  "dependencies": [{ "id": "org.streamscope.ffmpeg", "version": "^7.1" }],
+  "files": {},
+  "description": "调用现有 H.264 分析器的独立进程迁移验证版；报告由原查看器打开。"
+}

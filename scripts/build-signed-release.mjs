@@ -11,7 +11,8 @@ const root = resolve(import.meta.dirname, "..");
 const keyArgument = argument("key");
 if (!keyArgument) throw new Error("缺少发布者私钥路径：--key <路径>");
 const keyPath = resolve(keyArgument);
-const targetDir = resolve(argument("target", resolve(root, "target-release")));
+const core = process.argv.includes("--core");
+const targetDir = resolve(argument("target", resolve(root, core ? "target/core-host" : "target-release")));
 const privateKey = (await readFile(keyPath, "utf8")).trim();
 if (!privateKey) throw new Error(`签名私钥为空：${keyPath}`);
 
@@ -24,6 +25,7 @@ const installerPath = resolve(
 const builtLoaderPath = resolve(targetDir, "release/WebView2Loader.dll");
 const hookLoaderPath = resolve(root, "target/release/WebView2Loader.dll");
 const unsignedConfig = JSON.stringify({ bundle: { createUpdaterArtifacts: false } });
+const configs = core ? ["--config", resolve(root, "apps/desktop/src-tauri/tauri.core.conf.json")] : [];
 
 function run(args, env = process.env) {
   return new Promise((resolveRun, rejectRun) => {
@@ -42,11 +44,12 @@ function run(args, env = process.env) {
 }
 
 const buildEnvironment = { ...process.env, CARGO_TARGET_DIR: targetDir };
-await run(["build", "--no-bundle", "--config", unsignedConfig], buildEnvironment);
+await run(["build", "--no-bundle", ...configs, "--config", unsignedConfig,
+  ...(core ? ["--", "--no-default-features", "--offline"] : [])], buildEnvironment);
 await access(builtLoaderPath);
 await mkdir(dirname(hookLoaderPath), { recursive: true });
 await copyFile(builtLoaderPath, hookLoaderPath);
-await run(["bundle", "--bundles", "nsis", "--config", unsignedConfig], buildEnvironment);
+await run(["bundle", "--bundles", "nsis", ...configs, "--config", unsignedConfig], buildEnvironment);
 await access(installerPath);
 await run(["signer", "sign", "-f", keyPath, "--password=", installerPath]);
 

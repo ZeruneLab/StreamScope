@@ -1,0 +1,72 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://streamscope.dev/schemas/plugin-manifest.schema.json",
+  "title": "StreamScope plugin manifest v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schemaVersion", "id", "name", "version", "publisher", "hostApi", "platforms", "contributions", "ui", "permissions", "dependencies", "files"],
+  "properties": {
+    "schemaVersion": { "const": 1 },
+    "kind": { "enum": ["feature", "runtime"], "default": "feature" },
+    "id": { "$ref": "#/$defs/id" },
+    "name": { "type": "string", "minLength": 1, "maxLength": 128 },
+    "version": { "type": "string", "description": "SemVer 2.0.0" },
+    "description": { "type": "string" },
+    "license": { "type": "string" },
+    "publisher": {
+      "type": "object", "additionalProperties": false,
+      "required": ["id", "keyFingerprint"],
+      "properties": { "id": { "$ref": "#/$defs/id" }, "keyFingerprint": { "$ref": "#/$defs/digest" } }
+    },
+    "hostApi": { "type": "string", "description": "SemVer requirement, e.g. ^1.0" },
+    "platforms": {
+      "type": "array", "minItems": 1,
+      "items": {
+        "type": "object", "additionalProperties": false, "required": ["os", "arch", "entry"],
+        "properties": { "os": { "type": "string" }, "arch": { "type": "string" }, "entry": { "$ref": "#/$defs/path" } }
+      }
+    },
+    "contributions": {
+      "type": "array",
+      "items": {
+        "type": "object", "additionalProperties": false,
+        "required": ["id", "title", "kind", "action", "inputTypes", "view"],
+        "properties": {
+          "id": { "$ref": "#/$defs/id" }, "title": { "type": "string", "minLength": 1 },
+          "kind": { "type": "string" }, "action": { "type": "string", "minLength": 1 },
+          "inputTypes": { "type": "array", "items": { "type": "string" } },
+          "view": { "type": "string", "minLength": 1 }
+        }
+      }
+    },
+    "ui": {
+      "type": "object", "additionalProperties": false, "required": ["kind", "file"],
+      "properties": { "kind": { "const": "declarative" }, "file": { "$ref": "#/$defs/path" } }
+    },
+    "permissions": {
+      "type": "array", "items": {
+        "type": "object", "additionalProperties": false, "required": ["name"],
+        "properties": { "name": { "type": "string" }, "scope": { "type": "array", "items": { "type": "string" } } }
+      }
+    },
+    "dependencies": {
+      "type": "array", "items": {
+        "type": "object", "additionalProperties": false, "required": ["id", "version"],
+        "properties": { "id": { "$ref": "#/$defs/id" }, "version": { "type": "string" } }
+      }
+    },
+    "files": { "type": "object", "minProperties": 2, "propertyNames": { "$ref": "#/$defs/path" }, "additionalProperties": { "$ref": "#/$defs/digest" } }
+  },
+  "$defs": {
+    "id": { "type": "string", "pattern": "^[a-z0-9-]+(\\.[a-z0-9-]+)+$", "maxLength": 128 },
+    "path": { "type": "string", "minLength": 1, "maxLength": 240, "description": "Relative POSIX path; no dot components, backslashes, colons, Windows device names or case-fold collisions" },
+    "digest": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" }
+  },
+  "allOf": [
+    {
+      "if": { "required": ["kind"], "properties": { "kind": { "const": "runtime" } } },
+      "then": { "properties": { "contributions": { "maxItems": 0 } } },
+      "else": { "properties": { "contributions": { "minItems": 1 } } }
+    }
+  ]
+}

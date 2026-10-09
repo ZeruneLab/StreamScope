@@ -1,0 +1,25 @@
+{
+  "schemaVersion": 1,
+  "id": "org.streamscope.onvif",
+  "name": "ONVIF 设备诊断",
+  "version": "0.2.0",
+  "publisher": {
+    "id": "org.streamscope",
+    "keyFingerprint": "sha256:0000000000000000000000000000000000000000000000000000000000000000"
+  },
+  "hostApi": "^1.0",
+  "platforms": [
+    { "os": "windows", "arch": "x86_64", "entry": "bin/streamscope-plugin-onvif.exe" }
+  ],
+  "contributions": [
+    { "id": "org.streamscope.onvif.diagnose", "title": "ONVIF 设备诊断（插件）", "kind": "analysis", "action": "diagnose", "inputTypes": ["onvif-endpoint"], "view": "diagnose" },
+    { "id": "org.streamscope.onvif.discover", "title": "ONVIF 设备发现（插件）", "kind": "analysis", "action": "discover", "inputTypes": [], "view": "discover" }
+  ],
+  "ui": { "kind": "declarative", "file": "ui.json" },
+  "permissions": [
+    { "name": "network", "scope": ["device-selected-by-user", "multicast-ws-discovery"] }
+  ],
+  "dependencies": [],
+  "files": {},
+  "description": "独立进程运行的 ONVIF 发现与标准接口诊断。旧版内置入口暂保留，待界面和报告等价回归后迁移。"
+}

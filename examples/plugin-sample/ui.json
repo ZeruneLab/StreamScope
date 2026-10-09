@@ -1,0 +1,14 @@
+{
+  "schemaVersion": 1,
+  "views": [
+    {
+      "id": "main",
+      "title": "示例文件检查",
+      "components": [
+        { "type": "text", "text": "此示例只回显输入，不读取文件，也不生成诊断报告。" },
+        { "type": "input", "id": "path", "label": "文件", "inputType": "file", "required": true },
+        { "type": "output", "title": "插件返回" }
+      ]
+    }
+  ]
+}

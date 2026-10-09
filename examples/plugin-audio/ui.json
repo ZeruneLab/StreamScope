@@ -1,0 +1,18 @@
+{
+  "schemaVersion": 1,
+  "views": [{ "id": "main", "title": "音频文件诊断", "components": [
+    { "type": "input", "id": "path", "label": "音频文件", "inputType": "file", "required": true },
+    { "type": "output", "title": "分析任务" }
+  ] }, { "id": "export", "title": "音频格式导出", "components": [
+    { "type": "input", "id": "path", "label": "音频源文件（也可选择分析报告中的预览音频）", "inputType": "file", "required": true },
+    { "type": "select", "id": "format", "label": "保存格式", "options": ["wav", "mp3", "m4a", "flac", "ogg"], "required": true },
+    { "type": "input", "id": "startMs", "label": "起始毫秒（区间可留空）", "inputType": "number", "required": false },
+    { "type": "input", "id": "endMs", "label": "结束毫秒（区间可留空）", "inputType": "number", "required": false },
+    { "type": "output", "title": "导出结果" }
+  ] }, { "id": "evidence", "title": "音频异常证据导出", "components": [
+    { "type": "select", "id": "format", "label": "格式", "options": ["csv", "json"], "required": true },
+    { "type": "input", "id": "issues", "label": "时间戳证据 JSON", "inputType": "text", "required": false },
+    { "type": "input", "id": "intervals", "label": "内容异常区间 JSON", "inputType": "text", "required": false },
+    { "type": "output", "title": "导出结果" }
+  ] }]
+}
