@@ -126,6 +126,14 @@ try {
   assert.equal(await evaluate(`document.documentElement.scrollWidth>innerWidth`),false);
   console.log('完整工作台 UI 回归通过：多流选择、视频帧→QP 叠加、语法/HEX 放大、CSV 导出、音频图表/搜索、报告、ONVIF 与 SIP。IPC 为测试桩；不操作用户桌面。');
 } finally {
-  if(socket)socket.close();if(browser){browser.kill();await new Promise(done=>browser.once('exit',done));}
-  await new Promise(done=>server.close(done));await rm(profile,{recursive:true,force:true});
+  if(socket?.readyState===WebSocket.OPEN)socket.send(JSON.stringify({id:0,method:'Browser.close'}));
+  socket?.close();
+  if(browser && browser.exitCode===null){
+    const exited=new Promise(done=>browser.once('exit',done));
+    const forceExit=setTimeout(()=>browser.kill(),5000);
+    await exited;clearTimeout(forceExit);
+  }
+  server.closeAllConnections();
+  await new Promise(done=>server.close(done));
+  await rm(profile,{recursive:true,force:true,maxRetries:10,retryDelay:100}).catch(error=>console.warn(`测试浏览器临时目录暂被占用，保留于 ${profile}: ${error.code}`));
 }

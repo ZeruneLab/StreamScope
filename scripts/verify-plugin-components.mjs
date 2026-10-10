@@ -74,6 +74,25 @@ try {
   assert.deepEqual(plan.map(({ manifest }) => manifest.id), ["runtime", "a", "b", "root"]);
   assert.equal(requests.filter(({ id, selectedVersion }) => id === "runtime" && !selectedVersion).length, 1);
   assert(requests.some(({ id, selectedVersion }) => id === "runtime" && selectedVersion === "1.0.0"));
+  const batchRequests = [];
+  const batch = await planPluginInstallation([node("a", ["runtime"]), node("b", ["runtime"])], async (id, requirements, selectedVersion) => {
+    batchRequests.push({ id, selectedVersion });
+    return selectedVersion ? undefined : nodes[id];
+  });
+  assert.deepEqual(batch.map(({ manifest }) => manifest.id), ["runtime", "a", "b"]);
+  assert.equal(batchRequests.filter(({ id, selectedVersion }) => id === "runtime" && !selectedVersion).length, 1);
+  const selectedDependency = await planPluginInstallation([node("a", ["b"]), node("b")], async (_id, _requirements, selectedVersion) => {
+    assert.equal(selectedVersion, "1.0.0");
+    return undefined;
+  });
+  assert.deepEqual(selectedDependency.map(({ manifest }) => manifest.id), ["b", "a"]);
+  assert.deepEqual(await planPluginInstallation([], async () => undefined), []);
+  await assert.rejects(planPluginInstallation([node("a"), { manifest: { ...node("a").manifest, version: "2.0.0" } }], async () => undefined), /多个版本/);
+  await assert.rejects(planPluginInstallation([node("a", ["b"]), node("b", ["a"])], async () => undefined), /循环/);
+  await assert.rejects(planPluginInstallation([node("a", ["runtime"]), node("b", ["runtime"])], async (id, _requirements, version) => {
+    if (version) throw new Error("批量依赖版本冲突");
+    return nodes[id];
+  }), /批量依赖版本冲突/);
   await assert.rejects(planPluginInstallation(node("root", ["root"]), async () => undefined), /循环/);
   await assert.rejects(planPluginInstallation(root, async (id, requirements, selectedVersion) => {
     if (selectedVersion) throw new Error("版本不满足，未执行安装");
@@ -82,7 +101,7 @@ try {
   await assert.rejects(planPluginInstallation(root, async () => undefined), /未返回/);
   console.log("宿主语法树、HEX 和畸形插件结果的后台渲染验证通过。");
   console.log("插件文件、数值、密码、下拉和复选框渲染及执行中禁用验证通过。");
-  console.log("多层依赖排序、共享依赖去重、循环与版本冲突预检通过。");
+  console.log("单项/批量依赖排序、共享依赖去重、选中依赖复用、循环与版本冲突预检通过。");
 } finally {
   await server.close();
 }

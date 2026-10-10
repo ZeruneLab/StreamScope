@@ -184,17 +184,20 @@ async fn resolve_plugin_dependency(app: tauri::AppHandle, state: tauri::State<'_
 }
 
 #[tauri::command]
-fn install_prepared_plugin(app: tauri::AppHandle, state: tauri::State<'_, PluginState>, token: String, package_sha256: String, fingerprint: String) -> Result<InstalledPlugin, String> {
-    let mut guard = state.0.lock().map_err(|_| "插件状态锁异常".to_string())?;
-    ensure_plugins_idle(&guard)?;
-    let (entry, path) = guard.prepared.get(&token).ok_or_else(|| "下载任务不存在".to_string())?;
-    if !entry.matches_confirmation(&package_sha256, &fingerprint) {
-        return Err("确认的包或发布者与签名目录不一致".into());
-    }
-    let installed = plugin_store(&app)?.install(path, &package_sha256, &fingerprint)
-        .map_err(|error| error.to_string())?;
-    if let Some((_, path)) = guard.prepared.remove(&token) { let _ = std::fs::remove_file(path); }
-    Ok(installed)
+async fn install_prepared_plugin(app: tauri::AppHandle, state: tauri::State<'_, PluginState>, token: String, package_sha256: String, fingerprint: String) -> Result<InstalledPlugin, String> {
+    let runtime = state.0.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let mut guard = runtime.lock().map_err(|_| "插件状态锁异常".to_string())?;
+        ensure_plugins_idle(&guard)?;
+        let (entry, path) = guard.prepared.get(&token).ok_or_else(|| "下载任务不存在".to_string())?;
+        if !entry.matches_confirmation(&package_sha256, &fingerprint) {
+            return Err("确认的包或发布者与签名目录不一致".into());
+        }
+        let installed = plugin_store(&app)?.install(path, &package_sha256, &fingerprint)
+            .map_err(|error| error.to_string())?;
+        if let Some((_, path)) = guard.prepared.remove(&token) { let _ = std::fs::remove_file(path); }
+        Ok(installed)
+    }).await.map_err(|error| error.to_string())?
 }
 
 #[tauri::command]

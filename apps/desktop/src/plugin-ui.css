@@ -53,6 +53,68 @@
 .plugin-card p { margin: 5px 0; }
 .plugin-card small { display: block; color: #8694a4; overflow-wrap: anywhere; font-size: 11px; }
 .plugin-card .plugin-toolbar { margin-bottom: 0; }
+.plugin-section-heading { display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 10px; margin: 24px 0 12px; }
+.plugin-section-heading h3 { margin: 0; display: flex; gap: 8px; align-items: center; }
+.plugin-section-heading p { margin: 4px 0 0; font-size: 12px; }
+.plugin-section-heading > small, .plugin-section-heading > span { color: #6f7e91; font-size: 11px; }
+.plugin-batch-toolbar { display: flex; align-items: center; gap: 16px; flex-wrap: wrap; padding: 14px 16px; border: 1px solid #d7e5f3; border-radius: 8px 8px 0 0; background: #f2f7fd; }
+.plugin-batch-toolbar label { display: inline-flex; align-items: center; gap: 8px; color: #425d77; font-weight: 600; }
+.plugin-batch-toolbar > span { color: #6f7e91; font-size: 12px; }
+.plugin-batch-toolbar .plugin-primary { margin-left: auto; min-height: 38px; }
+.plugin-catalog-list { border: 1px solid #d7e5f3; border-top: 0; border-radius: 0 0 8px 8px; overflow: hidden; }
+.plugin-catalog-row { display: grid; grid-template-columns: 18px minmax(0, 1fr) 115px 64px 96px; gap: 14px; align-items: center; padding: 16px; border-bottom: 1px solid #e4ecf4; background: #fff; }
+.plugin-catalog-row:last-child { border-bottom: 0; }
+.plugin-catalog-row.is-selected { background: #f1f8ff; }
+.plugin-catalog-info { min-width: 0; }
+.plugin-catalog-info h4 { margin: 0; color: #29415a; font-size: 13px; }
+.plugin-catalog-info .plugin-badge { margin-left: 5px; }
+.plugin-catalog-info p { margin: 3px 0 1px; font-size: 12px; }
+.plugin-catalog-info small, .plugin-catalog-version small { display: block; color: #6f7e91; font-size: 11px; overflow-wrap: anywhere; }
+.plugin-catalog-version strong { color: #425d77; font-size: 12px; font-weight: 600; }
+.plugin-install-state { display: inline-flex; justify-content: center; align-items: center; white-space: nowrap; padding: 3px 8px; border-radius: 5px; font-size: 11px; color: #667c92; background: #eef3f8; }
+.plugin-install-state.success { color: #087b60; background: #e8f6f0; }
+.plugin-install-state.ready, .plugin-install-state.preparing, .plugin-install-state.installing { color: #176bc1; background: #eaf3ff; }
+.plugin-install-state.failed { color: #a73742; background: #fff0f1; }
+.plugin-install-state.skipped, .plugin-install-state.cancelled { color: #8b641d; background: #fff5df; }
+.plugin-install-progress { padding: 0 18px 14px; margin-top: 20px; border: 1px solid #d7e5f3; border-radius: 8px; background: #fbfdff; }
+.plugin-install-progress .plugin-section-heading { margin-top: 16px; }
+.plugin-install-progress progress { width: 100%; height: 8px; accent-color: #176cf1; }
+.plugin-install-progress > p { margin: 6px 0 10px; }
+.plugin-install-progress ul { list-style: none; margin: 0; padding: 0; }
+.plugin-install-progress li { display: flex; justify-content: space-between; align-items: start; gap: 12px; padding: 10px 0; border-top: 1px solid #e4ecf4; }
+.plugin-install-progress li > div { min-width: 0; }
+.plugin-install-progress li strong { color: #425d77; font-size: 12px; }
+.plugin-install-progress li small { color: #6f7e91; }
+.plugin-install-progress li p { margin: 3px 0 0; font-size: 12px; }
+.plugin-consent { margin-top: 20px; padding: 20px; border: 1px solid #c3dced; border-left: 3px solid #13bed1; border-radius: 8px; background: #f6fbff; }
+.plugin-consent > h3 { margin-top: 0; }
+.plugin-consent-items { max-height: 340px; overflow: auto; padding: 0 10px 0 0; scrollbar-width: thin; }
+.plugin-consent-items:focus-visible, .plugin-panel input[type="checkbox"]:focus-visible { outline: 2px solid #13bed1; outline-offset: 3px; }
+.plugin-consent details { padding: 12px 0; border-bottom: 1px solid #d7e5f3; }
+.plugin-consent summary, .plugin-publisher summary { cursor: pointer; color: #425d77; font-size: 12px; }
+.plugin-consent dl { display: grid; grid-template-columns: 85px minmax(0, 1fr); gap: 5px 12px; font-size: 11px; }
+.plugin-consent dt { color: #6f7e91; }
+.plugin-consent dd { margin: 0; color: #425d77; overflow-wrap: anywhere; }
+.plugin-consent details p { font-size: 11px; }
+.plugin-consent > small { color: #6f7e91; }
+.plugin-publisher { margin-top: 12px; }
+.plugin-installed-heading { padding-top: 4px; }
+@media (max-width: 1120px) {
+  .plugin-catalog-row { grid-template-columns: 18px minmax(0, 1fr) 95px 85px; gap: 10px; }
+  .plugin-catalog-row > .plugin-install-state { grid-column: 3; grid-row: auto; }
+  .plugin-catalog-row > button { grid-column: 4; grid-row: 1 / 3; }
+  .plugin-catalog-row > input, .plugin-catalog-info { grid-row: 1 / 3; }
+}
+@media (max-width: 780px) {
+  .plugin-catalog-row { grid-template-columns: 18px minmax(0, 1fr) 85px; }
+  .plugin-catalog-info { grid-column: 2; grid-row: 1; }
+  .plugin-catalog-row > input { grid-row: 1; }
+  .plugin-catalog-version { grid-column: 2; grid-row: 2; }
+  .plugin-catalog-row > .plugin-install-state { grid-column: 3; grid-row: 1; }
+  .plugin-catalog-row > button { grid-column: 3; grid-row: 2; }
+  .plugin-batch-toolbar .plugin-primary { width: 100%; margin-left: 0; }
+  .plugin-card-grid { grid-template-columns: minmax(0, 1fr); }
+}
 .plugin-report-list { display: grid; gap: 8px; max-height: 290px; overflow: auto; }
 .plugin-panel .plugin-report-row { width: 100%; display: flex; justify-content: space-between; gap: 14px; text-align: left; background: #fbfcfe; border-color: #dfe7ee; }
 .plugin-report-row span { min-width: 0; overflow-wrap: anywhere; }

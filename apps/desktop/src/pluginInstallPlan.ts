@@ -7,10 +7,17 @@ type PlanManifest = {
 
 // Resolve and validate the complete graph before requesting consent or changing the registry.
 export async function planPluginInstallation<T extends { manifest: PlanManifest }>(
-  root: T,
+  root: T | T[],
   resolve: (id: string, requirements: string[], selectedVersion?: string) => Promise<T | undefined>,
 ): Promise<T[]> {
-  const selected = new Map<string, T>([[root.manifest.id, root]]);
+  const roots = Array.isArray(root) ? root : [root];
+  const selected = new Map<string, T>();
+  for (const node of roots) {
+    const previous = selected.get(node.manifest.id);
+    if (previous && previous.manifest.version !== node.manifest.version) throw new Error(`不能同时选择 ${node.manifest.id} 的多个版本`);
+    selected.set(node.manifest.id, node);
+  }
+  if (selected.size > 100) throw new Error("插件依赖超过 100 项，停止安装");
   const active = new Set<string>();
   const done = new Set<string>();
   const ordered: T[] = [];
@@ -35,6 +42,6 @@ export async function planPluginInstallation<T extends { manifest: PlanManifest 
     done.add(id);
     ordered.push(node);
   }
-  await visit(root);
+  for (const node of selected.values()) await visit(node);
   return ordered;
 }

@@ -25,13 +25,49 @@ fixture.manifest.id = 'org.example.pcap';
 fixture.manifest.contributions[0].id = 'org.example.pcap.analyze';
 fixture.manifest.contributions[0].title = '第三方抓包入口（测试）';
 plugins.push(fixture); ui[fixture.manifest.id] = ui['org.streamscope.pcap'];
-const mock = `<script>const plugins=${JSON.stringify(plugins)}, ui=${JSON.stringify(ui)};
+const catalogManifests = plugins.filter(plugin => plugin.manifest.id.startsWith('org.streamscope.')).map(plugin => {
+  const manifest = structuredClone(plugin.manifest);
+  manifest.version = manifest.id.endsWith('.ffmpeg') ? '7.2.0' : '0.2.1';
+  manifest.dependencies.forEach(dependency => { if (dependency.id.endsWith('.ffmpeg')) dependency.version = '^7.2'; });
+  return manifest;
+});
+catalogManifests.push(JSON.parse(await readFile(join(root, 'examples/plugin-sample/manifest-template.json'), 'utf8')));
+const mock = `<script>const plugins=${JSON.stringify(plugins)}, ui=${JSON.stringify(ui)}, catalogManifests=${JSON.stringify(catalogManifests)};
 localStorage.setItem('streamscope.updater.auto-check','false');
 window.activePluginPage=()=>document.querySelector('.plugin-page:not([hidden])');
 window.workflowCalls=[];
+window.batchCalls=[];window.batchScenario='normal';const preparedTokens=new Map();
+const prepare=(id)=>{
+  if(window.batchScenario==='key-change' && id.endsWith('.h265'))throw new Error('发布者密钥已更换；请先手动移除旧插件并再次确认风险');
+  const manifest=catalogManifests.find(item=>item.id===id);
+  if(!manifest)throw new Error('missing test manifest');
+  const prepared={token:id,preview:{manifest,fingerprint:'test-only-fingerprint-'+id,packageSha256:'test-only-hash-'+id,nativeRisk:'后台测试原生插件风险提示'}};
+  preparedTokens.set(id,prepared);return prepared;
+};
 const group=(title,actions)=>({type:'actions',title,actions:actions.map(([id,title,pluginId])=>({id,title,pluginId}))});
 window.__TAURI_INTERNALS__={transformCallback:()=>1,invoke:async(command,args)=>{
 if(command==='list_plugins')return plugins;
+if(command==='check_official_plugins')return {generatedAt:'2026-10-10T00:00:00Z',packages:catalogManifests.map(manifest=>({id:manifest.id,version:manifest.version,packageSha256:'test-only-hash-'+manifest.id,publisherFingerprint:'test-only-fingerprint-'+manifest.id}))};
+if(command==='prepare_official_plugin'){
+  window.batchCalls.push({command,...args});await new Promise(done=>setTimeout(done,30));return prepare(args.id);
+}
+if(command==='resolve_plugin_dependency'){
+  window.batchCalls.push({command,...args});
+  if(window.batchScenario==='conflict')throw new Error('依赖版本冲突，未执行安装');
+  if(args.selectedVersion)return {};
+  const installed=plugins.find(item=>item.manifest.id===args.id && item.manifest.version===catalogManifests.find(item=>item.id===args.id)?.version);
+  return installed?{installed}:{prepared:prepare(args.id)};
+}
+if(command==='install_prepared_plugin'){
+  window.batchCalls.push({command,...args});await new Promise(done=>setTimeout(done,40));
+  const prepared=preparedTokens.get(args.token);
+  if(!prepared || args.fingerprint!==prepared.preview.fingerprint || args.packageSha256!==prepared.preview.packageSha256)throw new Error('确认摘要不匹配');
+  if(window.batchScenario==='dependency-failure' && args.token.endsWith('.ffmpeg'))throw new Error('模拟共享依赖安装失败');
+  const installed={manifest:prepared.preview.manifest,enabled:true,fingerprint:prepared.preview.fingerprint};
+  const index=plugins.findIndex(item=>item.manifest.id===installed.manifest.id);if(index>=0)plugins[index]=installed;else plugins.push(installed);
+  return installed;
+}
+if(command==='discard_prepared_plugin'){window.batchCalls.push({command,...args});preparedTokens.delete(args.token);return;}
 if(['list_plugin_reports','list_legacy_reports','list_analysis_reports'].includes(command))return [];
 if(command==='load_plugin_ui')return ui[args.id];
 if(command==='plugin:dialog|open')return 'C:\\\\layout-test\\\\sample.'+(args.options?.filters?.[0]?.extensions?.includes('pcap')?'pcap':'h264');
@@ -224,17 +260,112 @@ try {
   assert.equal(await evaluate("workflowCalls.at(-1).input.format"), 'mp3');
   assert.equal(await evaluate("workflowCalls.at(-1).continuation.actionId"), 'audio-export');
   await screenshot('pcap-audio-export-workflow');
+  const managerWait = (expression) => evaluate(`new Promise((done,reject)=>{let count=0;const poll=()=>{if(${expression})done(true);else if(++count>150)reject('batch not ready');else setTimeout(poll,25)};poll()})`);
+  const managerButton = (text) => evaluate(`(()=>{const button=[...document.querySelectorAll('.plugin-panel button')].find(button=>button.textContent.trim()===${JSON.stringify(text)});if(!button)throw new Error('Missing manager button: '+${JSON.stringify(text)});button.click()})()`);
+  const resetManager = async (scenario) => {
+    await call('Page.navigate', { url: `http://127.0.0.1:${server.address().port}/` });
+    await managerWait(`document.querySelectorAll('.plugin-card').length===10`);
+    await evaluate(`window.batchScenario=${JSON.stringify(scenario)}`);
+    await managerButton('检查官方插件目录');
+    await managerWait(`document.querySelectorAll('.plugin-catalog-row').length===10 && !document.querySelector('.plugin-toolbar button').disabled`);
+  };
+  const selectPlugin = (id) => evaluate(`(()=>{const row=[...document.querySelectorAll('.plugin-catalog-row')].find(row=>row.querySelector('small').textContent===${JSON.stringify('org.streamscope.' + id)});row.querySelector('input').click()})()`);
+  const beginBatch = () => evaluate(`document.querySelector('.plugin-batch-toolbar button').click()`);
+  const acceptBatch = async () => {
+    await managerWait(`document.querySelector('.plugin-consent')`);
+    assert.equal(await evaluate(`batchCalls.filter(call=>call.command==='install_prepared_plugin').length`), 0, 'no writes before consent');
+    assert.equal(await evaluate(`document.querySelector('.plugin-consent .plugin-primary').disabled`), true);
+    await evaluate(`document.querySelector('.plugin-consent input').click()`);
+    await managerButton('确认并安装');
+    await managerWait(`!document.querySelector('.plugin-toolbar button').disabled && !document.querySelector('.plugin-consent')`);
+  };
+  await resetManager('normal');
+  await screenshot('plugin-catalog-batch');
+  await call('Emulation.setDeviceMetricsOverride', { width: 1000, height: 720, deviceScaleFactor: 1, mobile: false });
+  assert.equal(await evaluate('document.documentElement.scrollWidth > innerWidth'), false);
+  await screenshot('plugin-catalog-batch-1000');
+  await call('Emulation.setDeviceMetricsOverride', { width: 1280, height: 900, deviceScaleFactor: 1, mobile: false });
+  await evaluate(`document.querySelector('.plugin-batch-toolbar input').click()`);
+  assert.equal(await evaluate(`document.querySelectorAll('.plugin-catalog-row input:checked').length`), 10);
+  await selectPlugin('sample');
+  assert.equal(await evaluate(`document.querySelector('.plugin-batch-toolbar input').indeterminate`), true);
+  await evaluate(`document.querySelector('.plugin-batch-toolbar input').click()`);
+  await evaluate(`document.querySelector('.plugin-batch-toolbar input').click()`);
+  assert.equal(await evaluate(`document.querySelectorAll('.plugin-catalog-row input:checked').length`), 0);
+  assert.equal(await evaluate(`document.querySelector('.plugin-batch-toolbar button').disabled`), true);
+  for(const id of ['audio','h264','onvif'])await selectPlugin(id);
+  await beginBatch();
+  await managerWait(`document.querySelector('.plugin-consent')`);
+  assert.equal(await evaluate(`document.querySelectorAll('.plugin-consent details').length`), 4);
+  assert.equal(await evaluate(`document.querySelector('.plugin-consent').textContent.includes('file-read') && document.querySelector('.plugin-consent').textContent.includes('test-only-fingerprint')`), true);
+  assert.equal(await evaluate(`batchCalls.filter(call=>call.command==='resolve_plugin_dependency' && !call.selectedVersion).length`), 1, 'shared dependency resolved once');
+  await screenshot('plugin-batch-consent');
+  await acceptBatch();
+  const installationOrder = await evaluate(`batchCalls.filter(call=>call.command==='install_prepared_plugin').map(call=>call.token)`);
+  assert.deepEqual(installationOrder, ['ffmpeg','h264','audio','onvif'].map(id=>'org.streamscope.'+id));
+  assert.equal(await evaluate('preparedTokens.size'), 0);
+  assert.equal(await evaluate(`document.querySelectorAll('.plugin-install-progress .success').length`), 4);
+  await screenshot('plugin-batch-complete');
+  await resetManager('normal');
+  await selectPlugin('audio');await beginBatch();
+  await managerWait(`document.querySelector('.plugin-consent')`);
+  await managerButton('取消本次安装');
+  await managerWait(`!document.querySelector('.plugin-toolbar button').disabled`);
+  assert.equal(await evaluate(`batchCalls.filter(call=>call.command==='install_prepared_plugin').length`), 0);
+  assert.equal(await evaluate('preparedTokens.size'), 0);
+  await resetManager('conflict');
+  await selectPlugin('audio');await beginBatch();
+  await managerWait(`!document.querySelector('.plugin-toolbar button').disabled && document.querySelector('[role=alert]')`);
+  assert.equal(await evaluate(`batchCalls.filter(call=>call.command==='install_prepared_plugin').length`), 0);
+  assert.equal(await evaluate('preparedTokens.size'), 0);
+  await resetManager('dependency-failure');
+  for(const id of ['audio','h264','onvif'])await selectPlugin(id);
+  await beginBatch();await acceptBatch();
+  assert.deepEqual(await evaluate(`batchCalls.filter(call=>call.command==='install_prepared_plugin').map(call=>call.token)`), ['org.streamscope.ffmpeg','org.streamscope.onvif']);
+  assert.equal(await evaluate(`document.querySelectorAll('.plugin-install-progress .skipped').length`), 2);
+  assert.equal(await evaluate(`document.querySelectorAll('.plugin-install-progress .failed').length`), 1);
+  assert.equal(await evaluate('preparedTokens.size'), 0);
+  await screenshot('plugin-batch-partial-failure');
+  await evaluate(`window.batchScenario='normal';window.batchCalls=[]`);
+  assert.equal(await evaluate(`document.querySelector('.plugin-batch-toolbar button').textContent.includes('（2）')`), true, 'successful roots are excluded from retry');
+  await beginBatch();await acceptBatch();
+  assert.deepEqual(await evaluate(`batchCalls.filter(call=>call.command==='install_prepared_plugin').map(call=>call.token)`), ['org.streamscope.ffmpeg','org.streamscope.h264','org.streamscope.audio']);
+  await evaluate(`window.batchCalls=[]`);
+  await selectPlugin('h265');await beginBatch();await acceptBatch();
+  assert.deepEqual(await evaluate(`batchCalls.filter(call=>call.command==='install_prepared_plugin').map(call=>call.token)`), ['org.streamscope.h265'], 'installed enabled runtime is reused without installing');
+  await resetManager('normal');
+  await evaluate(`[...document.querySelectorAll('.plugin-catalog-row')].find(row=>row.querySelector('small').textContent==='org.streamscope.onvif').querySelector('button').click()`);
+  await acceptBatch();
+  assert.deepEqual(await evaluate(`batchCalls.filter(call=>call.command==='install_prepared_plugin').map(call=>call.token)`), ['org.streamscope.onvif'], 'single install is preserved');
+  await resetManager('key-change');
+  for(const id of ['h265','onvif'])await selectPlugin(id);
+  await beginBatch();await acceptBatch();
+  assert.deepEqual(await evaluate(`batchCalls.filter(call=>call.command==='install_prepared_plugin').map(call=>call.token)`), ['org.streamscope.onvif']);
+  assert.equal(await evaluate(`document.querySelector('.plugin-install-progress').textContent.includes('发布者密钥已更换')`), true);
+  await resetManager('normal');
+  await selectPlugin('audio');await beginBatch();await managerWait(`document.querySelector('.plugin-consent')`);
+  await evaluate(`document.querySelectorAll('.nav-item').forEach(button=>{if(button.textContent.includes('历史报告'))button.click()})`);
+  await managerWait(`preparedTokens.size===0`);
+  assert.equal(await evaluate(`batchCalls.filter(call=>call.command==='install_prepared_plugin').length`), 0, 'leaving consent does not install');
+  console.log('批量多选/全选、统一风险确认、依赖去重与顺序、取消/离开清理、版本冲突零写入、依赖失败跳过与独立项继续、失败项重试、运行时复用、单项安装、密钥变更仍拦截的交互验证通过（模拟 IPC）。');
   console.log('PCAP 选流→视频深度、音频质量/格式导出、页面切换保留结果与返回扫描结果的交互回归通过（模拟 IPC）。');
   console.log(`插件管理和视频深度分析后台布局验证通过：${JSON.stringify(metrics)}`);
   console.log(`所有 ${checkedViews} 个插件入口的参数渲染和页面宽度检查通过；没有执行设备分析或修改插件安装。`);
   console.log(`截图：${screenshots}`);
 } finally {
+  if (socket?.readyState === WebSocket.OPEN) socket.send(JSON.stringify({ id: 0, method: "Browser.close" }));
   socket?.close();
   if (browser && browser.exitCode === null) {
     const exited = new Promise((done) => browser.once("exit", done));
-    browser.kill(); await exited;
+    const forceExit = setTimeout(() => browser.kill(), 5000);
+    await exited; clearTimeout(forceExit);
   }
+  server.closeAllConnections();
   await new Promise((done) => server.close(done));
   // Only this test's freshly created browser profile is removed.
-  await rm(profile, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
+  await rm(profile, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 }).catch(error => {
+    // Chromium child processes may briefly retain file locks after its main process exits.
+    // Do not obscure an assertion failure or delete any other profile.
+    console.warn(`测试浏览器临时目录暂被占用，保留于 ${profile}: ${error.code}`);
+  });
 }

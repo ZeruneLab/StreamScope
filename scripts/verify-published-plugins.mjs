@@ -53,33 +53,36 @@ async function digest(url) {
   return hash.digest("hex");
 }
 
-const directory = await bytes(`${base}/catalog.json`);
-const signature = Buffer.from((await bytes(`${base}/catalog.json.sig`)).toString().trim(), "base64");
-if (!verify(null, directory, ed25519(expectedCatalog), signature)) throw new Error("线上目录不是主程序配置的受信任密钥签名");
-const catalog = JSON.parse(directory);
-if (process.argv.includes("--api-assets")) {
-  for (const tag of new Set(catalog.packages.map(item => new URL(item.packageUrl).pathname.split("/")[5]))) {
-    await publicAssets("ZeruneLab/StreamScope-Plugins", tag);
+const localApp = process.argv.includes("--local-app");
+if (!process.argv.includes("--app-only") && !localApp) {
+  const directory = await bytes(`${base}/catalog.json`);
+  const signature = Buffer.from((await bytes(`${base}/catalog.json.sig`)).toString().trim(), "base64");
+  if (!verify(null, directory, ed25519(expectedCatalog), signature)) throw new Error("线上目录不是主程序配置的受信任密钥签名");
+  const catalog = JSON.parse(directory);
+  if (process.argv.includes("--api-assets")) {
+    for (const tag of new Set(catalog.packages.map(item => new URL(item.packageUrl).pathname.split("/")[5]))) {
+      await publicAssets("ZeruneLab/StreamScope-Plugins", tag);
+    }
+    console.log("使用 GitHub 公共资产 API 匿名下载；不代表本机 github.com 下载路径已通过。");
   }
-  console.log("使用 GitHub 公共资产 API 匿名下载；不代表本机 github.com 下载路径已通过。");
+  for (const item of catalog.packages) {
+    const actual = `sha256:${await digest(item.packageUrl)}`;
+    if (actual !== item.packageSha256) throw new Error(`线上包摘要错误：${item.id}`);
+    console.log(`匿名下载与 SHA-256 通过：${item.id} ${item.version}`);
+  }
+  console.log("官方插件目录验签、全部包匿名下载和摘要校验通过。");
 }
-for (const item of catalog.packages) {
-  const actual = `sha256:${await digest(item.packageUrl)}`;
-  if (actual !== item.packageSha256) throw new Error(`线上包摘要错误：${item.id}`);
-  console.log(`匿名下载与 SHA-256 通过：${item.id} ${item.version}`);
-}
-console.log("官方插件目录验签、全部包匿名下载和摘要校验通过。");
 
-if (process.argv.includes("--app")) {
-  if (process.argv.includes("--api-assets")) await publicAssets("ZeruneLab/StreamScope", "latest");
+if (process.argv.includes("--app") || process.argv.includes("--app-only") || localApp) {
+  if (!localApp && process.argv.includes("--api-assets")) await publicAssets("ZeruneLab/StreamScope", "latest");
   const release = join(root, "target/core-host/release");
   const expected = JSON.parse(readFileSync(join(release, "latest.json"), "utf8"));
-  const online = JSON.parse(await bytes("https://github.com/ZeruneLab/StreamScope/releases/latest/download/latest.json"));
+  const online = localApp ? expected : JSON.parse(await bytes("https://github.com/ZeruneLab/StreamScope/releases/latest/download/latest.json"));
   const platform = online.platforms?.["windows-x86_64"];
   if (online.version !== expected.version || JSON.stringify(platform) !== JSON.stringify(expected.platforms["windows-x86_64"])) {
     throw new Error("线上应用更新清单与本轮签名交付不一致");
   }
-  const installer = await bytes(platform.url);
+  const installer = localApp ? readFileSync(join(release, "bundle/nsis", new URL(platform.url).pathname.split("/").at(-1))) : await bytes(platform.url);
   const checksum = readFileSync(join(release, "SHA256SUMS.txt"), "utf8").trim().split(/\s+/)[0];
   if (createHash("sha256").update(installer).digest("hex") !== checksum) throw new Error("线上主程序安装包摘要不一致");
   const config = JSON.parse(readFileSync(join(root, "apps/desktop/src-tauri/tauri.conf.json"), "utf8"));
@@ -93,5 +96,5 @@ if (process.argv.includes("--app")) {
   if (!verify(null, message, ed25519(publicPacket.subarray(10)), signaturePacket.subarray(10))) {
     throw new Error("线上 Tauri 安装包签名无效");
   }
-  console.log(`主程序 v${online.version} 匿名更新清单、安装包摘要和 Ed25519 更新签名验证通过。`);
+  console.log(`主程序 v${online.version} ${localApp ? "本地" : "匿名"}更新清单、安装包摘要和 Ed25519 更新签名验证通过。`);
 }
