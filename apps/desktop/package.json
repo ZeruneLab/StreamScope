@@ -1,7 +1,7 @@
 {
   "name": "streamscope-desktop",
   "private": true,
-  "version": "0.2.1",
+  "version": "0.2.2",
   "type": "module",
   "scripts": {
     "dev": "vite",
@@ -13,6 +13,7 @@
     "core:package": "node ../../scripts/core-host.mjs package",
     "core:verify": "node ../../scripts/verify-core-host.mjs",
     "plugin:verify-components": "node ../../scripts/verify-plugin-components.mjs",
+    "updater:verify-dialog": "node ../../scripts/verify-update-dialog.mjs",
     "tauri": "tauri"
   },
   "dependencies": {

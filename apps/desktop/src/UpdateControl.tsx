@@ -2,6 +2,7 @@ import { getVersion } from "@tauri-apps/api/app";
 import { relaunch } from "@tauri-apps/plugin-process";
 import { check } from "@tauri-apps/plugin-updater";
 import { useEffect, useState } from "react";
+import { createPortal } from "react-dom";
 
 const AUTO_CHECK_KEY = "streamscope.updater.auto-check";
 const SKIPPED_VERSION_KEY = "streamscope.updater.skipped-version";
@@ -150,7 +151,7 @@ export function UpdateControl({ analysisRunning, coreOnly = false }: { analysisR
       {message && <small className={phase === "error" ? "update-error" : "update-message"}>{message}</small>}
     </div>
 
-    {dialogOpen && update && <div className="update-overlay" role="presentation">
+    {dialogOpen && update && createPortal(<div className="update-overlay" role="presentation">
       <section className="update-dialog" role="dialog" aria-modal="true" aria-labelledby="update-title">
         <div className="update-dialog-heading">
           <div><span>STREAMSCOPE UPDATE</span><h2 id="update-title">发现新版本 v{update.version}</h2></div>
@@ -175,6 +176,6 @@ export function UpdateControl({ analysisRunning, coreOnly = false }: { analysisR
           {phase === "error" && <><button type="button" className="secondary" onClick={dismiss}>关闭</button><button type="button" onClick={() => { void checkForUpdate(true); }}>重新检查</button></>}
         </div>
       </section>
-    </div>}
+    </div>, document.body)}
   </>;
 }
